@@ -259,6 +259,36 @@ begin
   end if;
 end $$;
 
+create table if not exists public.market_search_results (
+  id uuid primary key default gen_random_uuid(),
+  run_id uuid not null references public.council_runs(id) on delete cascade,
+  product_idea_id uuid references public.product_ideas(id) on delete set null,
+  idea_title text not null,
+  query text not null,
+  title text not null,
+  url text not null,
+  snippet text,
+  source text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.tool_existence_checks (
+  id uuid primary key default gen_random_uuid(),
+  run_id uuid not null references public.council_runs(id) on delete cascade,
+  product_idea_id uuid references public.product_ideas(id) on delete set null,
+  idea_title text not null,
+  exact_tool_exists boolean not null default false,
+  similar_tool_count integer not null default 0,
+  similar_source_code_kit_count integer not null default 0,
+  common_category_risk text not null default 'medium',
+  actual_tool_gap_score integer not null default 5 check (actual_tool_gap_score between 0 and 10),
+  source_code_gap_score integer not null default 5 check (source_code_gap_score between 0 and 10),
+  confidence integer not null default 0 check (confidence between 0 and 100),
+  notes text,
+  evidence jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.final_reports (
   id uuid primary key default gen_random_uuid(),
   council_run_id uuid not null unique references public.council_runs(id) on delete cascade,
@@ -343,6 +373,10 @@ create index if not exists product_scores_total_idx on public.product_scores(tot
 create index if not exists market_evidence_run_idx on public.market_evidence(council_run_id, created_at desc);
 create index if not exists market_evidence_product_idx on public.market_evidence(product_idea_id);
 create index if not exists market_evidence_signal_idx on public.market_evidence(signal_type, strength_score desc);
+create index if not exists market_search_results_run_idx on public.market_search_results(run_id, created_at desc);
+create index if not exists market_search_results_idea_idx on public.market_search_results(product_idea_id);
+create index if not exists tool_existence_checks_run_idx on public.tool_existence_checks(run_id, created_at desc);
+create index if not exists tool_existence_checks_idea_idx on public.tool_existence_checks(product_idea_id);
 create index if not exists execution_plans_run_idx on public.execution_plans(council_run_id);
 create index if not exists execution_tasks_plan_sort_idx on public.execution_tasks(execution_plan_id, sort_order);
 create index if not exists execution_tasks_status_idx on public.execution_tasks(execution_plan_id, status);
@@ -399,6 +433,8 @@ alter table public.agent_messages enable row level security;
 alter table public.product_ideas enable row level security;
 alter table public.product_scores enable row level security;
 alter table public.market_evidence enable row level security;
+alter table public.market_search_results enable row level security;
+alter table public.tool_existence_checks enable row level security;
 alter table public.final_reports enable row level security;
 alter table public.execution_plans enable row level security;
 alter table public.execution_tasks enable row level security;
@@ -638,6 +674,24 @@ using (
       and cr.user_id = auth.uid()
   )
 );
+
+drop policy if exists "Users can read their market search results" on public.market_search_results;
+create policy "Users can read their market search results"
+on public.market_search_results for select
+using (exists (select 1 from public.council_runs cr where cr.id = market_search_results.run_id and cr.user_id = auth.uid()));
+
+create policy "Users can insert their market search results"
+on public.market_search_results for insert
+with check (exists (select 1 from public.council_runs cr where cr.id = market_search_results.run_id and cr.user_id = auth.uid()));
+
+drop policy if exists "Users can read their tool existence checks" on public.tool_existence_checks;
+create policy "Users can read their tool existence checks"
+on public.tool_existence_checks for select
+using (exists (select 1 from public.council_runs cr where cr.id = tool_existence_checks.run_id and cr.user_id = auth.uid()));
+
+create policy "Users can insert their tool existence checks"
+on public.tool_existence_checks for insert
+with check (exists (select 1 from public.council_runs cr where cr.id = tool_existence_checks.run_id and cr.user_id = auth.uid()));
 
 drop policy if exists "Users can read their final reports" on public.final_reports;
 create policy "Users can read their final reports"

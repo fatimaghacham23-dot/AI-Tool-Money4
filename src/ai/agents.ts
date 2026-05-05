@@ -25,6 +25,31 @@ export const DEFAULT_AGENTS: CouncilAgent[] = [
     color: "amber",
     icon: "RadioTower",
   },
+
+  {
+    key: "market-research",
+    name: "Market Research Agent",
+    role: "Checks whether shortlisted tools already exist in the market.",
+    systemPrompt:
+      "You are the market reality checker. Your job is to prove whether this product already exists. Be brutal. If tools exist, name them and lower actual_tool_gap. Do not let the council choose copycat ideas. Cite searched market evidence and use cautious language like 'not found in searched market evidence'.",
+    modelProvider: "github-models",
+    modelName: "openai/gpt-4.1",
+    enabled: true,
+    color: "blue",
+    icon: "SearchCheck",
+  },
+  {
+    key: "buyer-intent",
+    name: "Buyer Intent Agent",
+    role: "Challenges urgency, existing purchase behavior, and validation speed.",
+    systemPrompt:
+      "You validate buyer intent. Challenge urgency, willingness to pay, current manual workarounds, and whether LinkedIn can validate this quickly. Do not accept tool-gap claims without searched market evidence.",
+    modelProvider: "github-models",
+    modelName: "openai/gpt-4o",
+    enabled: true,
+    color: "orange",
+    icon: "MessageCircleQuestion",
+  },
   {
     key: "developer-buyer",
     name: "Developer Buyer Agent",

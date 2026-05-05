@@ -1,4 +1,10 @@
 import { agentByKey, DEFAULT_AGENTS, normalizeAgentForProvider } from "@/ai/agents";
+import { runInteractiveCouncilChat } from "@/ai/interactive-council";
+import {
+  applyMarketGapRules,
+  canBuildNowWithMarketEvidence,
+  runMarketExistenceCheck,
+} from "@/ai/market-gap-scoring";
 import { expandMockIdeas } from "@/ai/mock-data";
 import {
   createDeterministicReport,
@@ -26,6 +32,8 @@ import type {
   ScoredProductIdea,
 } from "@/ai/types";
 import type { RunDebugTracer } from "@/lib/debug/run-debug-tracer";
+import { createMarketSearchProvider } from "@/lib/market-search/provider";
+import type { ToolExistenceCheck } from "@/lib/market-search/types";
 import type { AIProvider } from "@/providers/types";
 
 type CouncilMessage = {
@@ -74,6 +82,8 @@ type DebateState = {
   refinements: Refinement[];
   shortlist: ProductIdeaDraft[];
   marketEvidence: MarketEvidenceDraft[];
+  toolExistenceChecks: ToolExistenceCheck[];
+  marketSearchStatus: "pending" | "completed" | "failed";
   scoreHistory: ScoreHistoryEntry[];
   whyOthersLost: Array<{ title: string; reason: string }>;
   finalDecision?: FinalDecision;
@@ -94,32 +104,6 @@ type TopIdeasResponse = {
 type ShortlistResponse = {
   message: string;
   topIdeas: Array<{ title: string; reason: string; requiredFix: string }>;
-};
-
-type DebateResponse = {
-  message: string;
-  referencedAgentOrIdea: string;
-  strongestIdea: string;
-  weakestIdea: string;
-  demoHook?: string;
-  commentSignal?: "price" | "send me" | "code" | "none";
-  developerSavings?: string;
-  agencyNiches?: string[];
-  buildComplexity?: string;
-  mvpScope?: string[];
-  doNotBuild?: string[];
-  pricingTiers?: {
-    lite: string;
-    pro: string;
-    agency: string;
-  };
-  criticisms: Array<{
-    title: string;
-    criticism: string;
-    riskLevel: "low" | "medium" | "high";
-  }>;
-  ideaRisks?: Array<{ title: string; risks: string[] }>;
-  refinements: Array<{ title: string; refinement: string }>;
 };
 
 type ScoreResponseItem = Partial<ProductScore> & {
@@ -153,12 +137,12 @@ const ROUND_DEFINITIONS = [
   {
     roundNumber: 1,
     roundType: "idea_generation",
-    title: "Round 1: Generate 12 Product Ideas",
+    title: "Round 1: Generate Hidden Workflow Candidates",
   },
   {
     roundNumber: 2,
     roundType: "skeptic_filter",
-    title: "Round 2: Skeptic Rejects Weak Ideas",
+    title: "Round 2: Skeptic Rejects Generic/Crowded Ideas",
   },
   {
     roundNumber: 3,
@@ -167,23 +151,28 @@ const ROUND_DEFINITIONS = [
   },
   {
     roundNumber: 4,
-    roundType: "agent_debate",
-    title: "Round 4: Agents Debate Each Idea",
+    roundType: "market_search",
+    title: "Round 4: Market Search / Existence Check",
   },
   {
     roundNumber: 5,
-    roundType: "scoring",
-    title: "Round 5: Score Each Idea",
+    roundType: "interactive_council_chat",
+    title: "Round 5: Interactive Council Chat",
   },
   {
     roundNumber: 6,
-    roundType: "judge",
-    title: "Round 6: Judge Makes Build Gate Decision",
+    roundType: "scoring",
+    title: "Round 6: Score Each Idea With Evidence",
   },
   {
     roundNumber: 7,
+    roundType: "judge",
+    title: "Round 7: Judge Makes Build Gate Decision",
+  },
+  {
+    roundNumber: 8,
     roundType: "final_report",
-    title: "Round 7: Generate Complete Final Report",
+    title: "Round 8: Final Report + Validation Pack",
   },
 ] satisfies DebateRoundDraft[];
 
@@ -255,6 +244,8 @@ export async function runCouncilDebate({
     refinements: [],
     shortlist: [],
     marketEvidence: [],
+    toolExistenceChecks: [],
+    marketSearchStatus: "pending",
     scoreHistory: [],
     whyOthersLost: [],
   };
@@ -342,23 +333,26 @@ export async function runCouncilDebate({
   );
 
   const round4 = await createRound(3, persistence);
-  await debateShortlist(state, provider, enabledAgents, round4, persistence, tracer);
+  await runMarketSearchRound(state, round4, persistence, tracer);
 
   const round5 = await createRound(4, persistence);
-  let scoredIdeas = await scoreShortlist(state, provider, judgeAgent, tracer, round5, persistence);
+  await runInteractiveDebateRound(state, provider, enabledAgents, round5, persistence, tracer);
+
+  const round6 = await createRound(5, persistence);
+  let scoredIdeas = await scoreShortlist(state, provider, judgeAgent, tracer, round6, persistence);
   await persistence?.saveScores(scoredIdeas);
   await recordMessage(
     state,
     persistence,
-    round5,
+    round6,
     pricingAgent,
     renderScoreMessage(scoredIdeas),
-    modelForRound(pricingAgent, provider, round5),
+    modelForRound(pricingAgent, provider, round6),
     provider.name,
   );
 
-  const round6 = await createRound(5, persistence);
-  const judgeDecision = await chooseWinner(state, provider, judgeAgent, scoredIdeas, tracer, round6, persistence);
+  const round7 = await createRound(6, persistence);
+  const judgeDecision = await chooseWinner(state, provider, judgeAgent, scoredIdeas, tracer, round7, persistence);
   state.finalDecision = judgeDecision.finalDecision;
   state.finalDecisionReason = judgeDecision.reason;
   state.whyOthersLost = judgeDecision.whyOthersLost;
@@ -388,15 +382,15 @@ export async function runCouncilDebate({
   await recordMessage(
     state,
     persistence,
-    round6,
+    round7,
     judgeAgent,
     renderJudgeMessage(winner, judgeDecision),
-    modelForRound(judgeAgent, provider, round6),
+    modelForRound(judgeAgent, provider, round7),
     provider.name,
   );
 
-  const round7 = await createRound(6, persistence);
-  const report = await generateReport(state, provider, judgeAgent, winner, scoredIdeas, tracer, round7, persistence);
+  const round8 = await createRound(7, persistence);
+  const report = await generateReport(state, provider, judgeAgent, winner, scoredIdeas, tracer, round8, persistence);
   await persistence?.saveFinalReport(report, winner);
   const finalReportMessage =
     judgeDecision.finalDecision === "build_now"
@@ -407,19 +401,19 @@ export async function runCouncilDebate({
   await recordMessage(
     state,
     persistence,
-    round7,
+    round8,
     judgeAgent,
     finalReportMessage,
-    modelForRound(judgeAgent, provider, round7),
+    modelForRound(judgeAgent, provider, round8),
     provider.name,
   );
 
   await persistence?.updateRunProgress?.({
-    currentRound: round7.title,
+    currentRound: round8.title,
     currentAgent: judgeAgent.name,
     currentStep: "Council completed",
     currentProvider: provider.name,
-    currentModel: modelForRound(judgeAgent, provider, round7),
+    currentModel: modelForRound(judgeAgent, provider, round8),
     progressPercent: 100,
   });
   await persistence?.markRunStatus?.("completed");
@@ -431,6 +425,7 @@ export async function runCouncilDebate({
     agents: enabledAgents,
     ideas,
     marketEvidence: state.marketEvidence,
+    toolExistenceChecks: state.toolExistenceChecks,
     shortlistedIdeas: state.shortlist,
     scoredIdeas,
     winner,
@@ -1095,7 +1090,79 @@ Return JSON only:
   };
 }
 
-async function debateShortlist(
+
+async function runMarketSearchRound(
+  state: DebateState,
+  round: RoundRecord,
+  persistence?: DebatePersistence,
+  tracer?: RunDebugTracer,
+) {
+  const marketAgent = agentByKey("market-research");
+  const provider = createMarketSearchProvider();
+  state.marketSearchStatus = "pending";
+  tracer?.addEvent({
+    step: "market_search_start",
+    status: "start",
+    round: round.title,
+    agent: marketAgent.name,
+    provider: provider.name,
+    details: { ideas: state.shortlist.map((idea) => idea.title) },
+  });
+  await persistence?.updateRunProgress?.({
+    currentRound: round.title,
+    currentAgent: marketAgent.name,
+    currentStep: "Searching real market evidence before scoring",
+    currentProvider: provider.name,
+    currentModel: "market-search-provider",
+    progressPercent: progressForRound(round.roundNumber, "model_call"),
+  });
+
+  const checks: ToolExistenceCheck[] = [];
+  for (const idea of state.shortlist) {
+    const check = await runMarketExistenceCheck(idea, provider);
+    checks.push(check);
+    tracer?.addEvent({
+      step: "market_search_result",
+      status: check.marketSearchStatus === "completed" ? "ok" : "failed",
+      round: round.title,
+      agent: marketAgent.name,
+      provider: provider.name,
+      details: summarizeToolExistenceCheck(check),
+    });
+  }
+
+  state.toolExistenceChecks = checks;
+  const marketSearchEvidence = marketChecksAsEvidenceDrafts(checks).map((item) => ({
+    ...item,
+    productIdeaId: state.shortlist.find((idea) => idea.title === item.title.replace("Market Search Reality Check: ", ""))?.id ?? null,
+  }));
+  const savedMarketSearchEvidence =
+    (await persistence?.saveMarketEvidence?.(marketSearchEvidence)) ?? marketSearchEvidence;
+  state.marketEvidence = [...state.marketEvidence, ...savedMarketSearchEvidence];
+  state.marketSearchStatus = checks.some((check) => check.marketSearchStatus === "failed")
+    ? "failed"
+    : "completed";
+  tracer?.addEvent({
+    step: "existence_check_completed",
+    status: state.marketSearchStatus === "completed" ? "ok" : "failed",
+    round: round.title,
+    agent: marketAgent.name,
+    provider: provider.name,
+    details: { status: state.marketSearchStatus, checks: checks.map(summarizeToolExistenceCheck) },
+  });
+
+  await recordMessage(
+    state,
+    persistence,
+    round,
+    marketAgent,
+    renderMarketSearchRoundMessage(checks),
+    "market-search-provider",
+    provider.name,
+  );
+}
+
+async function runInteractiveDebateRound(
   state: DebateState,
   provider: AIProvider,
   agents: CouncilAgent[],
@@ -1103,106 +1170,54 @@ async function debateShortlist(
   persistence?: DebatePersistence,
   tracer?: RunDebugTracer,
 ) {
-  const debatingAgents = agents.filter((agent) =>
-    [
-      "linkedin-virality",
-      "developer-buyer",
-      "agency-buyer",
-      "skeptic",
-      "builder",
-      "pricing",
-    ].includes(agent.key),
-  );
+  await persistence?.updateRunProgress?.({
+    currentRound: round.title,
+    currentAgent: "Interactive Council",
+    currentStep: "Agents are replying to each other with market evidence",
+    currentProvider: provider.name,
+    currentModel: "interactive_council_chat",
+    progressPercent: progressForRound(round.roundNumber, "model_call"),
+  });
 
-  for (const agent of debatingAgents) {
-    const fallback = localDebateResponse(agent, state.shortlist, state.marketEvidence);
-    const model = modelForRound(agent, provider, round);
+  const compactContext = buildCompactDebateContext(state, {
+    mode: "agent_debate",
+    maxMessages: 4,
+    maxIdeas: 5,
+    maxEvidence: 4,
+    maxText: 5000,
+  }).text;
+  const messages = await runInteractiveCouncilChat({
+    provider,
+    agents,
+    ideas: state.shortlist,
+    existenceChecks: state.toolExistenceChecks,
+    compactContext,
+  });
 
-    let response: DebateResponse;
-    try {
-      ({ response } = await callModelJSON<DebateResponse>({
-        state,
-        provider,
-        agent,
-        round,
-        tracer,
-        persistence,
-        mode: "agent_debate",
-        buildPrompt: (context) => `
-Respond inside the council-room debate. Challenge or refine the current shortlist.
-Use market evidence when available. If there is no evidence for an idea, say that directly.
-
-Agent-specific requirements:
-${agentSpecificRequirements(agent)}
-
-Compact council context:
-${context}
-
-Return JSON only:
-{
-  "message": "string",
-  "referencedAgentOrIdea": "string",
-  "strongestIdea": "string",
-  "weakestIdea": "string",
-  "demoHook": "string",
-  "commentSignal": "price | send me | code | none",
-  "developerSavings": "string",
-  "agencyNiches": ["string"],
-  "buildComplexity": "string",
-  "mvpScope": ["string"],
-  "doNotBuild": ["string"],
-  "pricingTiers": {"lite": "string", "pro": "string", "agency": "string"},
-  "criticisms": [
-    {"title": "string", "criticism": "string", "riskLevel": "low | medium | high"}
-  ],
-  "ideaRisks": [
-    {"title": "string", "risks": ["string", "string", "string"]}
-  ],
-  "refinements": [
-    {"title": "string", "refinement": "string"}
-  ]
-}
-`,
-        fallback,
-        expectedSchema: "DebateResponse",
-        temperature: 0.45,
-        maxTokens: agent.key === "skeptic" ? 2600 : 1700,
-        okDetails: (response) => ({
-          messageLength: typeof response.message === "string" ? response.message.length : 0,
-          criticisms: Array.isArray(response.criticisms) ? response.criticisms.length : 0,
-          refinements: Array.isArray(response.refinements) ? response.refinements.length : 0,
-        }),
-      }));
-    } catch (error) {
-      attachFailureMetadata(error, {
-        failedStep: "model_call",
-        failedRound: round.title,
-        failedAgent: agent.name,
-        failedProvider: provider.name,
-        failedModel: model,
-      });
-      tracer?.addEvent({
-        step: "model_call",
-        status: "failed",
-        round: round.title,
-        agent: agent.name,
-        provider: provider.name,
-        model,
-        error,
-      });
-      throw error;
-    }
-
-    const normalized = normalizeDebateResponse(response, agent, state.shortlist);
-    applyDebateResponse(state, agent, round, normalized);
+  for (const message of messages) {
+    const agent = agents.find((item) => item.key === message.agentKey) ?? agentByKey(message.agentKey);
+    tracer?.addEvent({
+      step: "interactive_debate_turn",
+      status: "ok",
+      round: round.title,
+      agent: message.agentName,
+      provider: message.provider,
+      model: message.model,
+      details: {
+        replyingToAgent: message.replyingToAgent,
+        claimType: message.claimType,
+        referencedIdea: message.referencedIdea,
+        evidenceLinks: message.evidenceLinks,
+      },
+    });
     await recordMessage(
       state,
       persistence,
       round,
       agent,
-      renderDebateResponse(agent, normalized),
-      model,
-      provider.name,
+      renderInteractiveCouncilMessage(message),
+      message.model,
+      message.provider,
     );
   }
 }
@@ -1215,7 +1230,13 @@ async function scoreShortlist(
   round?: RoundRecord,
   persistence?: DebatePersistence,
 ) {
-  const localScores = scoreIdeasLocally(state.shortlist, state.marketEvidence);
+  const localScores = scoreIdeasLocally(state.shortlist, state.marketEvidence).map((score, index) =>
+    applyMarketGapRules(
+      state.shortlist[index],
+      score,
+      findExistenceCheck(state, state.shortlist[index].title),
+    ),
+  );
   const localExplanations = explainScoresLocally(
     state.shortlist,
     state.marketEvidence,
@@ -1234,13 +1255,19 @@ async function scoreShortlist(
       mode: "scoring",
       buildPrompt: (context) => `
 Score each shortlisted product idea from 0-10 using the exact Day-One Sale Probability rubric keys below.
-Use compact criticisms, refinements, rejected ideas, market evidence, and the final shortlist.
-Add a short explanation for every individual score.
-Reward evidence-backed fast buyer signal. Penalize ideas where urgency, purchase behavior, comment/DM likelihood, or price believability is unverified.
+You must use market search evidence. You are not allowed to guess actual_tool_gap or source_code_gap from model opinion.
+If market search found similar products, reduce actual_tool_gap. If source-code kits/templates exist, reduce source_code_gap.
+If a product already exists in many forms, reject or niche down. If no evidence is available, do not give high gap scores.
+Use cautious language: say "not found in searched market evidence," never "does not exist in the world."
 
 Hard rules:
 - If actual_tool_gap < 7, the product cannot win.
+- If source_code_gap < 7, the product cannot win build_now.
 - If hidden_workflow_specificity < 7, the product cannot win.
+- If market_search_status is not completed, build_now is forbidden.
+- If exactToolExists = true and similarToolCount >= 3, actual_tool_gap cannot exceed 6.
+- If similarSourceCodeKits >= 2, source_code_gap cannot exceed 6.
+- If common_category_risk is high, the idea cannot be build_now.
 - Penalize obvious common categories (proposal generator, chatbot, content generator, meeting summarizer, invoice generator, resume builder, social media calendar, email assistant, website audit tool) unless the workflow is clearly weirdly specific and not common.
 
 Rubric keys:
@@ -1331,11 +1358,34 @@ Return JSON only:
       response.scores?.find((candidate) => candidate.title === idea.title) ??
       response.scores?.[index];
     const fallbackScore = localScores[index];
-    const score = normalizeScore({
+    const modelScore = normalizeScore({
       ...fallbackScore,
       ...scoreCandidate,
       productIdeaId: idea.id,
     });
+    const score = applyMarketGapRules(
+      idea,
+      modelScore,
+      findExistenceCheck(state, idea.title),
+    );
+    if (score.actual_tool_gap !== modelScore.actual_tool_gap || score.source_code_gap !== modelScore.source_code_gap) {
+      tracer?.addEvent({
+        step: "gap_score_adjusted",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model,
+        details: {
+          ideaTitle: idea.title,
+          modelActualToolGap: modelScore.actual_tool_gap,
+          adjustedActualToolGap: score.actual_tool_gap,
+          modelSourceCodeGap: modelScore.source_code_gap,
+          adjustedSourceCodeGap: score.source_code_gap,
+          existenceCheck: summarizeToolExistenceCheck(findExistenceCheck(state, idea.title)),
+        },
+      });
+    }
     const explanations = normalizeScoreExplanations(
       scoreCandidate?.explanations ??
         scoreCandidate?.score_explanations ??
@@ -1405,8 +1455,9 @@ Make the final Day-One Sale Probability decision.
 
 Judge Agent requirements:
 - product_scores.total_score is Day-One Sale Probability (0-100).
-- Only return finalDecision "build_now" if the selected product scores ${DAY_ONE_BUILD_THRESHOLD}+ and has buyer_urgency >= 7, linkedin_demo_strength >= 7, actual_tool_gap >= 7, hidden_workflow_specificity >= 7, and manual_workaround_pain >= 7.
-- If at least one product clears actual_tool_gap >= 7, hidden_workflow_specificity >= 7, and manual_workaround_pain >= 7 but does not clear the build-now gate, finalDecision must be "validate_first" and the reason must include the exact phrase: "Validate first / Do not build yet."
+- Only return finalDecision "build_now" if the selected product scores ${DAY_ONE_BUILD_THRESHOLD}+ and has buyer_urgency >= 7, linkedin_demo_strength >= 7, actual_tool_gap >= 7, source_code_gap >= 7, hidden_workflow_specificity >= 7, manual_workaround_pain >= 7, market_search_status = completed, and no obvious exact tool was found.
+- If market search failed, confidence is low, exact tools were found, or common_category_risk is high, finalDecision cannot be "build_now".
+- If at least one product clears actual_tool_gap >= 7, source_code_gap >= 7, hidden_workflow_specificity >= 7, and manual_workaround_pain >= 7 but does not clear the build-now gate, finalDecision must be "validate_first" and the reason must include the exact phrase: "Validate first / Do not build yet."
 - If all ideas fail actual_tool_gap, hidden_workflow_specificity, or manual_workaround_pain, finalDecision must be "reject_all" and the reason must include the exact phrase: "Reject all. Generate better hidden-gap ideas or add stronger market evidence."
 - Do not invent a winner. Do not validate weak generic ideas.
 - Do not select a winner when finalDecision is "validate_first" or "reject_all"; use candidateTitle only for the best validation candidate and null when finalDecision is "reject_all".
@@ -1512,7 +1563,18 @@ Return JSON only:
     });
   }
 
-  const finalDecision = inferFinalDecision(sorted);
+  const inferredDecision = inferFinalDecision(sorted);
+  const initialWinner = selectDecisionCandidate(sorted, inferredDecision);
+  const finalDecision = enforceMarketFinalDecision(
+    state,
+    initialWinner,
+    inferredDecision,
+    tracer,
+    round,
+    agent,
+    provider,
+    model,
+  );
   const winner = selectDecisionCandidate(sorted, finalDecision);
   const reason = enforceDecisionReason(
     safeText(response.reason, fallback.reason),
@@ -1575,6 +1637,7 @@ function selectDecisionCandidate(
 function isGapEligible(score: ProductScore) {
   return (
     score.actual_tool_gap >= 7 &&
+    score.source_code_gap >= 7 &&
     score.hidden_workflow_specificity >= 7 &&
     score.manual_workaround_pain >= 7
   );
@@ -1587,6 +1650,43 @@ function isBuildReady(score: ProductScore) {
     score.buyer_urgency >= 7 &&
     score.linkedin_demo_strength >= 7
   );
+}
+
+function enforceMarketFinalDecision(
+  state: DebateState,
+  candidate: ScoredProductIdea,
+  decision: FinalDecision,
+  tracer: RunDebugTracer | undefined,
+  round: RoundRecord | undefined,
+  agent: CouncilAgent,
+  provider: AIProvider,
+  model: string,
+): FinalDecision {
+  if (decision !== "build_now") {
+    return decision;
+  }
+
+  const check = findExistenceCheck(state, candidate.title);
+  if (canBuildNowWithMarketEvidence(candidate.score, check)) {
+    return "build_now";
+  }
+
+  const fallbackDecision = isGapEligible(candidate.score) ? "validate_first" : "reject_all";
+  tracer?.addEvent({
+    step: "build_now_blocked_by_market_search",
+    status: "ok",
+    round: round?.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: {
+      candidateTitle: candidate.title,
+      fallbackDecision,
+      marketSearchStatus: state.marketSearchStatus,
+      existenceCheck: summarizeToolExistenceCheck(check),
+    },
+  });
+  return fallbackDecision;
 }
 
 function defaultJudgeReason(candidate: ScoredProductIdea, decision: FinalDecision) {
@@ -1706,7 +1806,9 @@ Rules:
 - Include the Pre-Sell Pack: LinkedIn validation post, teaser post, DM reply, follow-up DM, payment link message, screenshot checklist, 30-second demo script, and go/no-go threshold.
 - Use concrete architecture, schema, routes, UI pages, pricing, launch/validation post, DM script, demo video script, and packaging checklist.
 - Return JSON with keys: finalDecision, dayOneSaleProbability, reportMarkdown, linkedinPost, dmScript, demoVideoScript, buildPlan, packagingChecklist, preSellPack, codexBuildBlueprint, codexPrompt.
-- The reportMarkdown must include # Market Evidence Used and # Codex Build Blueprint sections.
+- The reportMarkdown must include # Market Search Reality Check, # Existing Tool Check, # Hidden Workflow Gap, # Why this is not a copycat, # Better Niche Down, # Market Evidence Used, and # Codex Build Blueprint sections.
+- The Market Search Reality Check must list exact queries used, similar tools found, source-code kits found, exact-tool status, confidence, actual_tool_gap evidence, and source_code_gap evidence.
+- If the idea is too close to existing tools, finalDecision must remain validate_first or reject_all and the report must say why.
 - The Codex Prompt must start exactly with: "You are my senior full-stack engineer. Build this full-source-code product..."
 `,
       fallback,
@@ -1759,6 +1861,8 @@ Rules:
 
   if (
     !hasDecisionPhrase ||
+    !/#\s*Market Search Reality Check/i.test(reportMarkdown) ||
+    !/#\s*Existing Tool Check/i.test(reportMarkdown) ||
     !/#\s*Market Evidence Used/i.test(reportMarkdown) ||
     !/#\s*Codex Build Blueprint/i.test(reportMarkdown)
   ) {
@@ -1811,6 +1915,20 @@ Source Code Market Agent:
 - Suggest source-code products developers, agencies, freelancers, or founders would actually buy.
 - Explain why the source code itself has resale value.
 - Prefer implementation shortcuts, client-ready portals, and reusable business workflows.`;
+    case "market-research":
+      return `
+Market Research Agent:
+- You are the market reality checker.
+- Prove whether this product already exists in searched evidence.
+- Name competitors, alternatives, and source-code kits when present.
+- Lower actual_tool_gap and source_code_gap when searched evidence shows similar products.
+- Do not let the council choose copycat ideas.`;
+    case "buyer-intent":
+      return `
+Buyer Intent Agent:
+- Challenge buyer urgency and existing purchase behavior.
+- Ask whether LinkedIn can validate the pain fast.
+- Do not accept high gap scores without market search evidence.`;
     case "linkedin-virality":
       return `
 LinkedIn Virality Agent:
@@ -1975,11 +2093,18 @@ function buildCompactDebateContext(
             refinement: truncateText(item.refinement, 220),
           })),
     recentMessages: summarizeMessagesForPrompt(state.messages, maxMessages),
+    marketSearchStatus: state.marketSearchStatus,
+    toolExistenceChecks: summarizeExistenceChecksForPrompt(
+      state.toolExistenceChecks,
+      options.aggressive ? 3 : 5,
+    ),
     scoreHistory:
       options.mode === "judge" || options.mode === "final_report"
         ? state.scoreHistory.map((score) => ({
             title: score.title,
             totalScore: score.totalScore,
+            actualToolGap: score.score.actual_tool_gap,
+            sourceCodeGap: score.score.source_code_gap,
             reason: truncateText(score.reason, 180),
           }))
         : undefined,
@@ -2040,10 +2165,13 @@ function createReportContext(
     })),
     scoredIdeas,
     scoreHistory: state.scoreHistory,
-    marketEvidence: state.marketEvidence.slice(0, 5).map((item) => ({
-      ...item,
-      content: truncateText(item.content, 260),
-    })),
+    marketEvidence: [
+      ...state.marketEvidence.slice(0, 5).map((item) => ({
+        ...item,
+        content: truncateText(item.content, 260),
+      })),
+      ...marketChecksAsEvidenceDrafts(state.toolExistenceChecks),
+    ],
     whyOthersLost: state.whyOthersLost,
     finalDecision: state.finalDecision,
     finalDecisionReason: state.finalDecisionReason,
@@ -2142,103 +2270,6 @@ function applyShortlistRefinements(
   }
 }
 
-function normalizeDebateResponse(
-  response: DebateResponse,
-  agent: CouncilAgent,
-  shortlist: ProductIdeaDraft[],
-): DebateResponse {
-  const fallback = localDebateResponse(agent, shortlist);
-  const ideaTitles = new Set(shortlist.map((idea) => idea.title));
-  const criticisms = (response.criticisms ?? fallback.criticisms)
-    .filter((item) => ideaTitles.has(item.title))
-    .map((item) => ({
-      title: item.title,
-      criticism: safeText(item.criticism, "This needs sharper buyer proof."),
-      riskLevel: normalizeRiskLevel(item.riskLevel),
-    }));
-  const refinements = (response.refinements ?? fallback.refinements)
-    .filter((item) => ideaTitles.has(item.title))
-    .map((item) => ({
-      title: item.title,
-      refinement: safeText(
-        item.refinement,
-        "Narrow the product to one buyer workflow and one demoable output.",
-      ),
-    }));
-  const ideaRisks =
-    agent.key === "skeptic"
-      ? shortlist.map((idea) => {
-          const match = response.ideaRisks?.find((risk) => risk.title === idea.title);
-          return {
-            title: idea.title,
-            risks: ensureAtLeastThreeRisks(match?.risks ?? idea.risks, idea),
-          };
-        })
-      : response.ideaRisks?.filter((item) => ideaTitles.has(item.title));
-
-  return {
-    ...fallback,
-    ...response,
-    message: safeText(response.message, fallback.message),
-    referencedAgentOrIdea: safeText(
-      response.referencedAgentOrIdea,
-      fallback.referencedAgentOrIdea,
-    ),
-    strongestIdea: ideaTitles.has(response.strongestIdea)
-      ? response.strongestIdea
-      : fallback.strongestIdea,
-    weakestIdea: ideaTitles.has(response.weakestIdea)
-      ? response.weakestIdea
-      : fallback.weakestIdea,
-    commentSignal: normalizeCommentSignal(response.commentSignal ?? fallback.commentSignal),
-    agencyNiches: safeList(response.agencyNiches ?? fallback.agencyNiches),
-    mvpScope: safeList(response.mvpScope ?? fallback.mvpScope),
-    doNotBuild: safeList(response.doNotBuild ?? fallback.doNotBuild),
-    pricingTiers: response.pricingTiers ?? fallback.pricingTiers,
-    criticisms,
-    refinements,
-    ideaRisks,
-  };
-}
-
-function applyDebateResponse(
-  state: DebateState,
-  agent: CouncilAgent,
-  round: RoundRecord,
-  response: DebateResponse,
-) {
-  for (const item of response.criticisms) {
-    state.criticisms.push({
-      agentName: agent.name,
-      title: item.title,
-      criticism: item.criticism,
-      riskLevel: item.riskLevel,
-      roundNumber: round.roundNumber,
-    });
-  }
-
-  for (const item of response.ideaRisks ?? []) {
-    for (const risk of item.risks) {
-      state.criticisms.push({
-        agentName: agent.name,
-        title: item.title,
-        criticism: risk,
-        riskLevel: "high",
-        roundNumber: round.roundNumber,
-      });
-    }
-  }
-
-  for (const item of response.refinements) {
-    state.refinements.push({
-      agentName: agent.name,
-      title: item.title,
-      refinement: item.refinement,
-      roundNumber: round.roundNumber,
-    });
-  }
-}
-
 function renderGeneratedIdeasMessage(ideas: ProductIdeaDraft[]) {
   return [
     `Generated ${ideas.length} complete source-code product candidates.`,
@@ -2273,82 +2304,6 @@ function renderShortlistMessage(response: ShortlistResponse) {
       (idea) => `- ${idea.title}: ${idea.requiredFix} (${idea.reason})`,
     ),
   ].join("\n");
-}
-
-function renderDebateResponse(agent: CouncilAgent, response: DebateResponse) {
-  const lines = [
-    response.message,
-    "",
-    `Reference: ${response.referencedAgentOrIdea}`,
-    `Strongest idea: ${response.strongestIdea}`,
-    `Weakest idea: ${response.weakestIdea}`,
-  ];
-
-  if (response.demoHook) {
-    lines.push(`Demo hook: ${response.demoHook}`);
-  }
-
-  if (response.commentSignal) {
-    lines.push(`Likely LinkedIn comment signal: "${response.commentSignal}"`);
-  }
-
-  if (response.developerSavings) {
-    lines.push(`Developer savings: ${response.developerSavings}`);
-  }
-
-  if (response.agencyNiches?.length) {
-    lines.push(`Agency niches: ${response.agencyNiches.join(", ")}`);
-  }
-
-  if (response.buildComplexity) {
-    lines.push(`Build complexity: ${response.buildComplexity}`);
-  }
-
-  if (response.mvpScope?.length) {
-    lines.push("", "Exact MVP scope:", ...response.mvpScope.map((item) => `- ${item}`));
-  }
-
-  if (response.doNotBuild?.length) {
-    lines.push("", "Do not build yet:", ...response.doNotBuild.map((item) => `- ${item}`));
-  }
-
-  if (response.pricingTiers && agent.key === "pricing") {
-    lines.push(
-      "",
-      "License pricing:",
-      `- Lite: ${response.pricingTiers.lite}`,
-      `- Pro: ${response.pricingTiers.pro}`,
-      `- Agency: ${response.pricingTiers.agency}`,
-    );
-  }
-
-  if (response.ideaRisks?.length) {
-    lines.push("");
-    lines.push("Risks by idea:");
-    for (const item of response.ideaRisks) {
-      lines.push(`- ${item.title}: ${item.risks.join("; ")}`);
-    }
-  }
-
-  if (response.criticisms.length) {
-    lines.push("");
-    lines.push("Criticisms:");
-    lines.push(
-      ...response.criticisms.map(
-        (item) => `- [${item.riskLevel}] ${item.title}: ${item.criticism}`,
-      ),
-    );
-  }
-
-  if (response.refinements.length) {
-    lines.push("");
-    lines.push("Refinements:");
-    lines.push(
-      ...response.refinements.map((item) => `- ${item.title}: ${item.refinement}`),
-    );
-  }
-
-  return lines.join("\n");
 }
 
 function renderScoreMessage(scoredIdeas: ScoredProductIdea[]) {
@@ -2431,92 +2386,99 @@ function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft
   });
 }
 
-function localDebateResponse(
-  agent: CouncilAgent,
-  ideas: ProductIdeaDraft[],
-  evidence: MarketEvidenceDraft[] = [],
-): DebateResponse {
-  const top = ideas[0];
-  const weakest = ideas[ideas.length - 1] ?? top;
-  const evidenceLine = evidence.length
-    ? `Market evidence exists (${evidence.length} item(s)); the strongest signal is "${[...evidence].sort((a, b) => b.strengthScore - a.strengthScore)[0].title}".`
-    : "No market evidence was provided, so demand assumptions are unverified.";
-  const base = {
-    referencedAgentOrIdea: top.title,
-    strongestIdea: top.title,
-    weakestIdea: weakest.title,
-    demoHook: `Show a messy buyer workflow turning into a polished ${top.title} output, then reveal the complete source-code package.`,
-    commentSignal: "code" as const,
-    developerSavings: "Saves roughly 40-80 hours versus rebuilding auth, schema, UI, prompts, and docs.",
-    agencyNiches: ["software agencies", "freelance dev shops", "B2B consultants"],
-    buildComplexity: "Medium complexity if scoped to one workflow and one admin surface.",
-    mvpScope: top.mvpFeatures.slice(0, 4),
-    doNotBuild: ["Native mobile app", "Marketplace", "Deep third-party integrations"],
-    pricingTiers: {
-      lite: "$149 - single project source license with setup docs",
-      pro: "$299 - commercial license with prompt guide and seed data",
-      agency: "$599 - client-use license with white-label rights",
-    },
-    criticisms: [
-      {
-        title: weakest.title,
-        criticism:
-          "This loses if the buyer cannot see saved implementation time within the first demo minute.",
-        riskLevel: "medium" as const,
-      },
-    ],
-    refinements: [
-      {
-        title: top.title,
-        refinement:
-          "Make the MVP prove one painful workflow and package the source code with docs, seed data, and prompt notes.",
-      },
-    ],
-  };
 
-  if (agent.key === "skeptic") {
-    return {
-      ...base,
-      message: `${top.title} is strongest only if the demo proves real saved work. ${evidenceLine} I disagree with any blanket optimism: every shortlisted idea needs source-code resale proof, not just AI sparkle.`,
-      ideaRisks: ideas.map((idea) => ({
-        title: idea.title,
-        risks: ensureAtLeastThreeRisks(idea.risks, idea),
-      })),
-    };
-  }
+function findExistenceCheck(state: DebateState, title: string) {
+  return state.toolExistenceChecks.find((check) => check.ideaTitle === title);
+}
 
-  if (agent.key === "pricing") {
-    return {
-      ...base,
-      message: `${top.title} can support Lite, Pro, and Agency licenses, but the price only works if the package includes clean source code, docs, seed data, prompt customization, and license clarity. ${evidenceLine}`,
-    };
-  }
-
-  if (agent.key === "builder") {
-    return {
-      ...base,
-      message: `${top.title} is buildable in 7-21 days if the V1 keeps one core workflow, one admin view, and one AI output. Do not build billing, mobile, or integrations before validation. ${evidenceLine}`,
-    };
-  }
-
-  if (agent.key === "developer-buyer") {
-    return {
-      ...base,
-      message: `A developer would pay for ${top.title} if it saves at least a week of setup. I would challenge the shortlist on code quality: messy architecture kills source-code resale value. ${evidenceLine}`,
-    };
-  }
-
-  if (agent.key === "agency-buyer") {
-    return {
-      ...base,
-      message: `An agency can resell ${top.title} if it is white-label and nicheable. The strongest client niches are teams with recurring reporting, approvals, proposals, or admin workflows. ${evidenceLine}`,
-    };
+function summarizeToolExistenceCheck(check?: ToolExistenceCheck) {
+  if (!check) {
+    return null;
   }
 
   return {
-    ...base,
-    message: `${top.title} has the strongest scroll-stopping demo if the post shows the problem, the AI-generated output, and the code package. I would expect comments like "code" or "send me". ${evidenceLine}`,
+    ideaTitle: check.ideaTitle,
+    marketSearchStatus: check.marketSearchStatus,
+    exactToolExists: check.exactToolExists,
+    similarToolCount: check.similarSaaSTools.length,
+    similarSourceCodeKitCount: check.similarSourceCodeKits.length,
+    commonCategoryRisk: check.commonCategoryRisk,
+    actualToolGapScore: check.actualToolGapScore,
+    sourceCodeGapScore: check.sourceCodeGapScore,
+    confidence: check.confidence,
+    notes: truncateText(check.notes, 260),
+    queries: check.evidence.map((item) => item.query),
+    similarTools: check.similarSaaSTools.slice(0, 5).map((result) => ({
+      title: result.title,
+      url: result.url,
+      query: result.query,
+    })),
+    sourceCodeKits: check.similarSourceCodeKits.slice(0, 5).map((result) => ({
+      title: result.title,
+      url: result.url,
+      query: result.query,
+    })),
   };
+}
+
+function summarizeExistenceChecksForPrompt(checks: ToolExistenceCheck[], limit: number) {
+  return checks.slice(0, limit).map(summarizeToolExistenceCheck);
+}
+
+function marketChecksAsEvidenceDrafts(checks: ToolExistenceCheck[]): MarketEvidenceDraft[] {
+  return checks.slice(0, 5).map((check) => ({
+    productIdeaId: null,
+    sourceType: "market_search",
+    sourceName: "Market Search Reality Check",
+    sourceUrl: check.similarSaaSTools[0]?.url ?? check.similarSourceCodeKits[0]?.url ?? null,
+    title: `Market Search Reality Check: ${check.ideaTitle}`,
+    content: renderMarketSearchSummary(check),
+    signalType: check.exactToolExists || check.commonCategoryRisk === "high" ? "competitor" : "market_gap_check",
+    strengthScore: check.confidence,
+  }));
+}
+
+function renderMarketSearchSummary(check: ToolExistenceCheck) {
+  return [
+    `market_search_status: ${check.marketSearchStatus}`,
+    `exact_tool_exists_in_searched_results: ${check.exactToolExists ? "yes" : "no/uncertain"}`,
+    `similar_saas_tools: ${check.similarSaaSTools.length}`,
+    `similar_source_code_kits: ${check.similarSourceCodeKits.length}`,
+    `common_category_risk: ${check.commonCategoryRisk}`,
+    `actual_tool_gap_score: ${check.actualToolGapScore}/10`,
+    `source_code_gap_score: ${check.sourceCodeGapScore}/10`,
+    `confidence: ${check.confidence}/100`,
+    `queries_used: ${check.evidence.map((item) => item.query).join("; ")}`,
+    `similar_tools_found: ${check.similarSaaSTools.slice(0, 5).map((result) => `${result.title} (${result.url})`).join("; ") || "none in searched results"}`,
+    `source_code_kits_found: ${check.similarSourceCodeKits.slice(0, 5).map((result) => `${result.title} (${result.url})`).join("; ") || "none in searched results"}`,
+    check.notes,
+  ].join("\n");
+}
+
+function renderMarketSearchRoundMessage(checks: ToolExistenceCheck[]) {
+  return `# Market Search / Existence Check\n\n${checks
+    .map((check) => `## ${check.ideaTitle}\n- Market search status: ${check.marketSearchStatus}\n- Exact tool exists in searched results: ${check.exactToolExists ? "yes" : "no/uncertain"}\n- Similar SaaS/tools found: ${check.similarSaaSTools.length}\n- Similar source-code kits/templates found: ${check.similarSourceCodeKits.length}\n- Common category risk: ${check.commonCategoryRisk}\n- Actual tool gap cap: ${check.actualToolGapScore}/10\n- Source-code gap cap: ${check.sourceCodeGapScore}/10\n- Confidence: ${check.confidence}/100\n- Queries used: ${check.evidence.map((item) => `"${item.query}"`).join(", ")}\n- Top similar tools: ${check.similarSaaSTools.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious tools found in searched results."}\n- Top source-code kits: ${check.similarSourceCodeKits.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious source-code kits found in searched results."}\n- Notes: ${check.notes}`)
+    .join("\n\n")}\n\nSafety language: these checks mean "not found in searched market evidence," not "does not exist in the world." Build now is blocked when market search fails, confidence is low, exact tools are obvious, or category risk is high.`;
+}
+
+function renderInteractiveCouncilMessage(message: {
+  replyingToAgent?: string;
+  claimType: string;
+  referencedIdea?: string;
+  message: string;
+  evidenceLinks: string[];
+}) {
+  return [
+    `Claim type: ${message.claimType}`,
+    message.replyingToAgent ? `Replying to: ${message.replyingToAgent}` : null,
+    message.referencedIdea ? `Referenced idea: ${message.referencedIdea}` : null,
+    "",
+    message.message,
+    "",
+    message.evidenceLinks.length ? `Evidence links: ${message.evidenceLinks.join(", ")}` : "Evidence links: none cited",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
 }
 
 function ensureAtLeastThreeRisks(risks: string[] | undefined, idea: ProductIdeaDraft) {
@@ -2673,21 +2635,6 @@ function safeList(value: unknown) {
   return value
     .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     .map((item) => item.trim());
-}
-
-function normalizeRiskLevel(value: unknown): "low" | "medium" | "high" {
-  return value === "low" || value === "medium" || value === "high"
-    ? value
-    : "medium";
-}
-
-function normalizeCommentSignal(value: unknown) {
-  return value === "price" ||
-    value === "send me" ||
-    value === "code" ||
-    value === "none"
-    ? value
-    : "code";
 }
 
 function findAgent(agents: CouncilAgent[], key: CouncilAgent["key"]) {

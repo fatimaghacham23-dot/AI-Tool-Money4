@@ -1,8 +1,10 @@
 import type { AgentRow, ProductIdeaStatus } from "@/types/database";
+import type { ToolExistenceCheck } from "@/lib/market-search/types";
 
 export type AgentKey =
   | "source-code-market"
   | "linkedin-virality"
+  | "market-research"
   | "buyer-intent"
   | "pre-sell"
   | "developer-buyer"
@@ -188,6 +190,7 @@ export type DebateArtifacts = {
   agents: CouncilAgent[];
   ideas: ProductIdeaDraft[];
   marketEvidence: MarketEvidenceDraft[];
+  toolExistenceChecks?: ToolExistenceCheck[];
   shortlistedIdeas: ProductIdeaDraft[];
   scoredIdeas: ScoredProductIdea[];
   winner: ScoredProductIdea;

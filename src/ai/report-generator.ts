@@ -325,6 +325,9 @@ ${risks.map((risk) => `- ${risk}`).join("\n")}
 ## Why Rejected Ideas Lost
 ${rejectedLosses.map((item) => `- ${item.title}: ${item.reason}`).join("\n")}
 
+# Market Search Reality Check
+${renderMarketSearchRealityCheck(context.marketEvidence)}
+
 # Existing Tool Check
 ## Does the exact tool already exist?
 This must be judged against the specific workflow, not the broad category. If this looks like a common SaaS/AI tool category, the council should treat the tool gap as weak.
@@ -349,7 +352,13 @@ People likely handle this through docs/spreadsheets/Slack/Notion/email/screensho
 Existing alternatives are often indirect, manual, generic, expensive, or incomplete for this specific workflow.
 
 ## Why this tool is different
-It packages the workflow end-to-end with a demoable before/after, plus full source-code ownership.
+It packages the workflow end-to-end with a demoable before/after, plus full source-code ownership. This is only a valid gap if the searched market evidence does not show an obvious exact product.
+
+# Why this is not a copycat
+The idea should be treated as non-copycat only where the exact workflow is not found in searched market evidence, similar SaaS results are indirect or incomplete, and source-code kits do not already package the same workflow. If market evidence is too close, keep the decision as validate_first or reject_all.
+
+# Better Niche Down
+${createNicheDowns(winner).map((item) => `- ${item}`).join("\n")}
 
 ## Why buyer would care now
 Because it reduces delivery risk/time and replaces manual workarounds with a repeatable workflow.
@@ -421,6 +430,35 @@ ${codexPrompt}
   };
 }
 
+
+function renderMarketSearchRealityCheck(evidence: MarketEvidenceDraft[] | undefined) {
+  const marketItems = (evidence ?? []).filter((item) => item.sourceType === "market_search");
+  if (!marketItems.length) {
+    return [
+      "- Market search status: no searched market evidence attached.",
+      "- Exact search queries used: none available.",
+      "- Similar tools found: unknown.",
+      "- Similar source-code kits found: unknown.",
+      "- Exact tool exists: uncertain.",
+      "- Confidence level: low.",
+      "- Decision impact: build_now is not allowed without completed market search evidence.",
+    ].join("\n");
+  }
+
+  return marketItems
+    .map((item) => `## ${item.title}\n${item.content}`)
+    .join("\n\n");
+}
+
+function createNicheDowns(winner: ScoredProductIdea) {
+  const buyer = winner.targetBuyer || "one narrow buyer segment";
+  return [
+    `${winner.title} for ${buyer} with one named handoff/approval workflow only`,
+    `${winner.title} focused on one painful manual workaround from ${winner.pain}`,
+    `${winner.title} as a source-code kit for a niche implementation service, not a broad SaaS category`,
+  ];
+}
+
 function createRejectAllReport(
   run: CouncilRunInput,
   highestScoredIdea: ScoredProductIdea,
@@ -475,8 +513,17 @@ ${evidenceToCollect.map((item) => `- ${item}`).join("\n")}
 ${nextPrompt}
 \`\`\`
 
+# Market Search Reality Check
+${renderMarketSearchRealityCheck(context.marketEvidence)}
+
 # Existing Tool Check
 Reject any idea that already exists as a common SaaS category, a common AI wrapper, or an obvious source-code template. The next run must prove the exact workflow gap, not just a broad product category.
+
+# Why this is not a copycat
+No copycat claim is allowed for this rejected run. If an idea looks close to existing tools or the searched evidence is weak, it remains reject_all.
+
+# Better Niche Down
+${createNicheDowns(highestScoredIdea).map((item) => `- ${item}`).join("\n")}
 
 # Hidden Workflow Gap
 No shortlisted idea proved a sufficiently weird, specific, painful workflow. The next council should start from observed manual workarounds and buyer language before naming products.
