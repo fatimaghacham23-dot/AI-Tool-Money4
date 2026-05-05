@@ -78,7 +78,7 @@ export default async function DebatePage({
           Council Debate
         </h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Watch the seven-round council pipeline as messages, ideas, scores, and failures are saved.
+          Watch the market-search round, interactive council chat, scoring, and judge decision as messages, evidence, ideas, scores, and failures are saved.
         </p>
       </div>
 

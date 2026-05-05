@@ -6,7 +6,9 @@ import {
   PackageSearch,
   RadioTower,
   Scale,
+  SearchCheck,
   ShieldAlert,
+  MessageCircleQuestion,
   Sparkles,
 } from "lucide-react";
 
@@ -16,6 +18,8 @@ import { cn } from "@/lib/utils";
 const iconMap = {
   PackageSearch,
   RadioTower,
+  SearchCheck,
+  MessageCircleQuestion,
   Code2,
   BriefcaseBusiness,
   ShieldAlert,
@@ -33,6 +37,8 @@ const colorMap = {
   emerald: "border-emerald-400/35 bg-emerald-400/15 text-emerald-100",
   violet: "border-violet-400/35 bg-violet-400/15 text-violet-100",
   fuchsia: "border-fuchsia-400/35 bg-fuchsia-400/15 text-fuchsia-100",
+  blue: "border-blue-400/35 bg-blue-400/15 text-blue-100",
+  orange: "border-orange-400/35 bg-orange-400/15 text-orange-100",
 };
 
 export function AgentIcon({

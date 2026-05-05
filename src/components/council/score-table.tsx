@@ -9,7 +9,7 @@ export function ScoreTable({ ideas }: { ideas: ProductIdeaView[] }) {
   if (!scored.length) {
     return (
       <p className="text-sm text-muted-foreground">
-        Scores will appear after Round 5 completes.
+        Scores will appear after the market-search and evidence-scoring rounds complete.
       </p>
     );
   }
