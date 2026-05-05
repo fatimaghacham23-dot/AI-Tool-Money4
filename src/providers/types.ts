@@ -5,7 +5,8 @@ export type AIProviderName =
   | "mistral"
   | "deepseek"
   | "grok"
-  | "local";
+  | "local"
+  | "github-models";
 
 export type GenerateTextOptions = {
   system: string;
