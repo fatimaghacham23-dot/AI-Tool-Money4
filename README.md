@@ -84,6 +84,9 @@ SUPABASE_SERVICE_ROLE_KEY=
 
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
+
+GITHUB_MODELS_TOKEN=
+GITHUB_MODELS_BASE_URL=https://models.github.ai/inference
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` is included for future server-side admin tasks. The current app uses the authenticated server client for normal run creation and persistence.
@@ -166,3 +169,33 @@ Edit roles and prompts at `/settings/agents`.
 - Payment features are intentionally absent.
 - The product recommendation is for selling complete source code, not SaaS subscriptions.
 - The local mock provider keeps the app previewable without `OPENAI_API_KEY`.
+
+
+## Using GitHub Models
+
+GitHub Models is the default multi-model provider for the council agents.
+
+1. Create a GitHub personal access token.
+2. Ensure the token has `models:read` permission.
+3. Add the token and base URL to `.env.local`:
+
+```env
+GITHUB_MODELS_TOKEN=ghp_xxx
+GITHUB_MODELS_BASE_URL=https://models.github.ai/inference
+```
+
+Supported model IDs:
+- `openai/gpt-4o`
+- `openai/gpt-4o-mini`
+- `openai/gpt-4.1`
+- `openai/gpt-4.1-nano`
+
+Assign providers and models at `/settings/agents`. Store exact IDs above for each agent.
+
+If `GITHUB_MODELS_TOKEN` is missing, the app logs a friendly warning and falls back to OpenAI when available, then mock/demo mode.
+
+Quick test:
+
+```bash
+node scripts/test-github-models.mjs
+```

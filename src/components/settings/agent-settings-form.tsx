@@ -8,6 +8,7 @@ import { AgentIcon } from "@/components/council/agent-icon";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -84,19 +85,27 @@ export function AgentSettingsForm({ agents }: { agents: CouncilAgent[] }) {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="grid gap-2">
                     <Label htmlFor={`${agent.key}:modelProvider`}>Provider</Label>
-                    <Input
+                    <Select
                       id={`${agent.key}:modelProvider`}
                       name={`${agent.key}:modelProvider`}
                       defaultValue={agent.modelProvider}
-                    />
+                    >
+                      <option value="github-models">GitHub Models</option>
+                      <option value="openai">OpenAI</option>
+                    </Select>
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor={`${agent.key}:modelName`}>Model</Label>
-                    <Input
+                    <Select
                       id={`${agent.key}:modelName`}
                       name={`${agent.key}:modelName`}
                       defaultValue={agent.modelName}
-                    />
+                    >
+                      <option value="openai/gpt-4o">GPT-4o</option>
+                      <option value="openai/gpt-4o-mini">GPT-4o mini</option>
+                      <option value="openai/gpt-4.1">GPT-4.1</option>
+                      <option value="openai/gpt-4.1-nano">GPT-4.1 nano</option>
+                    </Select>
                   </div>
                 </div>
 

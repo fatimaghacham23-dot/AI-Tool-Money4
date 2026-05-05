@@ -25,3 +25,8 @@ export function hasSupabaseServiceEnv() {
 export function hasOpenAIEnv() {
   return Boolean(process.env.OPENAI_API_KEY);
 }
+
+
+export function hasGitHubModelsEnv() {
+  return Boolean(process.env.GITHUB_MODELS_TOKEN);
+}

@@ -21,8 +21,7 @@ export default async function AgentSettingsPage() {
           Council roles and prompts
         </h1>
         <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground">
-          Tune each simulated agent. V1 uses OpenAI behind the provider adapter;
-          later providers can reuse the same role and scoring contracts.
+          Tune each simulated agent. GitHub Models is the primary provider, with OpenAI and demo fallback modes available.
         </p>
       </div>
 
