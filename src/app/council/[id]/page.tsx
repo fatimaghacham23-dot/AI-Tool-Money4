@@ -1,6 +1,8 @@
 import {
+  AlertTriangle,
   ArrowRight,
   CalendarDays,
+  ChevronRight,
   ClipboardCheck,
   FileText,
   MessageSquareText,
@@ -21,6 +23,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getCouncilRun } from "@/lib/data/council";
 import { currency, formatDate } from "@/lib/utils";
 
@@ -32,6 +35,14 @@ export default async function CouncilOverviewPage({
   const { id } = await params;
   const council = await getCouncilRun(id);
   const winner = council.winner;
+  const topScoredIdea = [...council.ideas]
+    .filter((idea) => idea.score)
+    .sort((a, b) => (b.score?.total_score ?? 0) - (a.score?.total_score ?? 0))[0] ?? null;
+  const spotlightIdea = winner ?? topScoredIdea;
+  const finalDecision =
+    council.report?.final_decision ?? (winner ? "build_now" : null);
+  const dayOneSaleProbability =
+    council.report?.day_one_sale_probability ?? spotlightIdea?.score?.total_score ?? null;
   const evidenceBacked =
     council.marketEvidence.length > 0 ||
     Boolean(council.run.market_evidence_notes?.trim());
@@ -79,25 +90,149 @@ export default async function CouncilOverviewPage({
         </div>
       </div>
 
-      {winner ? (
+      {council.run.status === "failed" ? (
+        <section className="rounded-lg border border-destructive/40 bg-destructive/12 p-6">
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+              <AlertTriangle className="size-4" aria-hidden="true" />
+              Council run failed
+            </div>
+            {council.run.error_message ? (
+              <p className="text-sm text-muted-foreground">{council.run.error_message}</p>
+            ) : null}
+            <div className="grid gap-2 text-sm">
+              {council.run.failed_step ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Step:</span>
+                  <Badge variant="outline">{council.run.failed_step}</Badge>
+                </div>
+              ) : null}
+              {council.run.failed_round ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Round:</span>
+                  <Badge variant="outline">{council.run.failed_round}</Badge>
+                </div>
+              ) : null}
+              {council.run.failed_agent ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Agent:</span>
+                  <Badge variant="outline">{council.run.failed_agent}</Badge>
+                </div>
+              ) : null}
+              {council.run.failed_provider ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Provider:</span>
+                  <Badge variant="outline">{council.run.failed_provider}</Badge>
+                </div>
+              ) : null}
+              {council.run.failed_model ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Model:</span>
+                  <Badge variant="outline">{council.run.failed_model}</Badge>
+                </div>
+              ) : null}
+              {council.run.failed_at ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">Failed at:</span>
+                  <span className="text-xs text-muted-foreground">
+                    {formatDate(council.run.failed_at)}
+                  </span>
+                </div>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-2 pt-2">
+              <Button asChild variant="outline" size="sm">
+                <Link href="/api/health/models" target="_blank">
+                  Check model health
+                </Link>
+              </Button>
+            </div>
+            {council.run.debug_trace && Array.isArray(council.run.debug_trace) && council.run.debug_trace.length > 0 ? (
+              <Collapsible className="mt-2">
+                <CollapsibleTrigger>
+                  <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground cursor-pointer">
+                    <ChevronRight className="size-4" />
+                    Debug trace
+                  </div>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="mt-2 space-y-2 rounded-md border bg-background/50 p-3">
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                    {council.run.debug_trace.map((event: any, idx: number) => {
+                      const time = typeof event.time === "string" ? new Date(event.time).toLocaleTimeString() : "";
+                      const status = String(event.status ?? "");
+                      const step = String(event.step ?? "");
+                      const round = event.round ? String(event.round) : null;
+                      const agent = event.agent ? String(event.agent) : null;
+                      const provider = event.provider ? String(event.provider) : null;
+                      const model = event.model ? String(event.model) : null;
+                      return (
+                        <div key={idx} className="text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground">{time}</span>
+                            <Badge
+                              variant={
+                                status === "failed"
+                                  ? "danger"
+                                  : status === "ok" || status === "fallback"
+                                    ? "secondary"
+                                    : "outline"
+                              }
+                            >
+                              {status}
+                            </Badge>
+                            <span className="font-medium">{step}</span>
+                          </div>
+                          {round ? <div className="pl-2 text-muted-foreground">Round: {round}</div> : null}
+                          {agent ? <div className="pl-2 text-muted-foreground">Agent: {agent}</div> : null}
+                          {provider ? <div className="pl-2 text-muted-foreground">Provider: {provider}</div> : null}
+                          {model ? <div className="pl-2 text-muted-foreground">Model: {model}</div> : null}
+                          {event.details ? (
+                            <pre className="mt-1 max-h-32 overflow-auto rounded bg-muted p-2 text-[10px]">
+                              {JSON.stringify(event.details, null, 2)}
+                            </pre>
+                          ) : null}
+                          {event.error ? (
+                            <pre className="mt-1 max-h-32 overflow-auto rounded bg-destructive/10 p-2 text-[10px] text-destructive">
+                              {JSON.stringify(event.error, null, 2)}
+                            </pre>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            ) : null}
+          </div>
+        </section>
+      ) : spotlightIdea ? (
         <section className="rounded-lg border border-secondary/40 bg-secondary/12 p-6">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <div className="flex items-center gap-2 text-sm font-medium text-secondary">
                 <Trophy className="size-4" aria-hidden="true" />
-                Final winner
+                {finalDecision === "validate_first"
+                  ? "Validate first / Do not build yet"
+                  : finalDecision === "reject_all"
+                    ? "Reject all"
+                    : winner
+                      ? "Build now"
+                      : "Top scored candidate"}
               </div>
               <h2 className="mt-3 text-2xl font-semibold tracking-normal">
-                {winner.title}
+                {spotlightIdea.title}
               </h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-                {winner.why_buy_source_code}
+                {spotlightIdea.why_buy_source_code}
               </p>
             </div>
             <div className="rounded-lg border border-secondary/30 bg-background/45 px-5 py-4 text-center">
-              <p className="text-xs uppercase text-muted-foreground">Total score</p>
+              <p className="text-xs uppercase text-muted-foreground">
+                Day-One Sale Probability
+              </p>
               <p className="mt-1 text-3xl font-semibold text-secondary">
-                {winner.score?.total_score ?? "?"}/100
+                {dayOneSaleProbability ?? "?"}/100
               </p>
             </div>
           </div>
@@ -165,7 +300,7 @@ export default async function CouncilOverviewPage({
           <CardHeader>
             <CardTitle>Scoreboard</CardTitle>
             <CardDescription>
-              Scored from 1-10 across ten source-code product criteria.
+              Scored from 0-10 across ten Day-One sale probability criteria.
             </CardDescription>
           </CardHeader>
           <CardContent>

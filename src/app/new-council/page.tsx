@@ -9,8 +9,9 @@ export default function NewCouncilPage() {
           Brief the agents
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
-          The council will generate twenty source-code product ideas, reject weak
-          ones, debate the top five, score them, and choose exactly one product.
+          The council will generate twelve source-code product ideas, reject weak
+          ones, debate the top five, score Day-One Sale Probability, and only
+          choose Build now when an idea clears 85.
         </p>
       </div>
 

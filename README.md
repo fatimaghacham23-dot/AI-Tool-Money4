@@ -199,3 +199,86 @@ Quick test:
 ```bash
 node scripts/test-github-models.mjs
 ```
+
+## Debug GitHub Models 401
+
+1. Open `/api/health/models?ts=123`.
+2. Check `tokenPresent`, `tokenLength`, `tokenPrefix`, `tokenFingerprint`, `hasWhitespace`, and `hasQuotes`.
+3. Check `rawFetchTest`.
+4. If `rawFetchTest.status` is `401`, the token is invalid, expired, revoked, lacks `models:read`, or the GitHub account does not have GitHub Models access.
+5. If `rawFetchTest.ok` is `true` but `sdkTest.ok` is `false`, the provider SDK configuration is wrong.
+6. For fine-grained tokens, use Public repositories plus Models: Read if a repo-specific token does not show the Models permission.
+7. A classic token can be used as a fallback if fine-grained token permissions are unavailable.
+8. Restart the dev server after editing `.env.local`.
+
+## Script Works But Health Returns 401
+
+This usually means the Node script and Next.js dev server are using different or stale environment variables.
+
+Kill all node processes:
+
+```powershell
+Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+Or run:
+
+```powershell
+.\scripts\kill-node-dev.ps1
+```
+
+Start the app again from the project root:
+
+```powershell
+cd "D:\AI-Tool-Money2"
+npm run dev
+```
+
+Compare `tokenFingerprint` from both checks:
+
+```powershell
+node scripts\test-github-models.mjs
+```
+
+Open:
+
+```txt
+http://localhost:3000/api/health/models?ts=123
+```
+
+If fingerprints differ, update `.env.local` and restart the dev server. If fingerprints match but the endpoint fails and the script succeeds, compare `finalUrl` and the raw fetch request body. If fingerprints match and both fail, the token or GitHub account access is invalid or lacks `models:read`.
+
+## Debugging Failed Council Runs
+
+When a council run fails, you can diagnose the issue using the built-in debug infrastructure:
+
+1. Set the debug environment variable in `.env.local`:
+   ```env
+   DEBUG_COUNCIL_RUNS=true
+   ```
+
+2. Restart the development server:
+   ```bash
+   npm run dev
+   ```
+
+3. Test the model provider health:
+   - Open http://localhost:3000/api/health/models
+   - This tests GitHub Models connectivity and returns status/hints for common errors (401/403/404/429/500)
+
+4. Create a council run and check the failure panel:
+   - If the run fails, the council page shows:
+     - Error message
+     - Failed step (e.g., `model_call`, `parse_payload`, `insert_council_run`)
+     - Failed round (e.g., "Round 1: Generate 20 Product Ideas")
+     - Failed agent (e.g., "Source Code Market Agent")
+     - Failed provider/model (e.g., "github-models / openai/gpt-4.1")
+     - Expandable debug trace with full execution log
+   - Check the server console for detailed `COUNCIL_RUN_FAILED` logs with trace data
+
+5. Common failure patterns:
+   - **401 Unauthorized**: GitHub Models token missing, expired, revoked, or lacks `models:read`
+   - **403 Forbidden**: Token doesn't have access to GitHub Models or selected model
+   - **404 Not Found**: Model ID may be unavailable or incorrect
+   - **429 Rate Limit**: Rate limit or quota exceeded
+   - **JSON Parse Errors**: Model returned invalid JSON; check debug trace for raw excerpt

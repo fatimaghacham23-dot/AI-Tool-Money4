@@ -11,6 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { getDashboardRuns } from "@/lib/data/council";
+import type { DashboardRun } from "@/lib/data/types";
 import { formatDate } from "@/lib/utils";
 
 export default async function DashboardPage() {
@@ -54,7 +55,7 @@ export default async function DashboardPage() {
         </Card>
         <Card>
           <CardHeader>
-            <CardDescription>Best current score</CardDescription>
+            <CardDescription>Best Day-One Probability</CardDescription>
             <CardTitle className="text-3xl">
               {Math.max(...runs.map((run) => run.totalScore ?? 0), 0)}/100
             </CardTitle>
@@ -66,7 +67,7 @@ export default async function DashboardPage() {
         <CardHeader>
           <CardTitle>Council Runs</CardTitle>
           <CardDescription>
-            Previous debates, winners, total score, and report status.
+            Previous debates, final decisions, Day-One probability, and report status.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -77,8 +78,8 @@ export default async function DashboardPage() {
                   <tr>
                     <th className="px-4 py-3">Run</th>
                     <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Winner</th>
-                    <th className="px-4 py-3">Score</th>
+                    <th className="px-4 py-3">Decision</th>
+                    <th className="px-4 py-3">Day-One Probability</th>
                     <th className="px-4 py-3">Date</th>
                     <th className="px-4 py-3 text-right">Open</th>
                   </tr>
@@ -96,6 +97,8 @@ export default async function DashboardPage() {
                             <Trophy className="size-4 text-secondary" aria-hidden="true" />
                             {run.winnerProduct}
                           </span>
+                        ) : run.finalDecision ? (
+                          decisionLabel(run.finalDecision)
                         ) : (
                           "Pending"
                         )}
@@ -136,4 +139,17 @@ export default async function DashboardPage() {
       </Card>
     </div>
   );
+}
+
+function decisionLabel(value: DashboardRun["finalDecision"]) {
+  switch (value) {
+    case "build_now":
+      return "Build now";
+    case "validate_first":
+      return "Validate first";
+    case "reject_all":
+      return "Reject all";
+    default:
+      return "Pending";
+  }
 }

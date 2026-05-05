@@ -12,7 +12,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 const defaultGoal =
-  "Find me the highest-probability full-source-code product I can build in 7-14 days and sell on LinkedIn.";
+  "Find me the full-source-code product with the highest Day-One Sale Probability: fastest buyer signal, fastest pre-sale, and strongest chance of selling from LinkedIn.";
 
 export function NewCouncilForm() {
   const router = useRouter();
@@ -56,7 +56,7 @@ export function NewCouncilForm() {
       return;
     }
 
-    router.push(`/council/${data.id}`);
+    router.push(`/council/${data.id}/debate`);
     router.refresh();
   }
 
@@ -172,7 +172,7 @@ export function NewCouncilForm() {
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-sm text-muted-foreground">
-              Creating a run starts the full seven-round debate pipeline.
+              Creating a run opens the live seven-round debate screen.
             </p>
             <Button type="submit" disabled={submitting} size="lg">
               {submitting ? (
@@ -180,7 +180,7 @@ export function NewCouncilForm() {
               ) : (
                 <Play aria-hidden="true" />
               )}
-              {submitting ? "Running council" : "Start council run"}
+              {submitting ? "Opening debate" : "Run council"}
             </Button>
           </div>
         </CardContent>

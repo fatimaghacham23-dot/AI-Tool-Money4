@@ -18,6 +18,13 @@ export type GenerateTextOptions = {
 
 export type GenerateJSONOptions<T> = GenerateTextOptions & {
   fallback: T;
+  expectedSchema?: string;
+  onParseError?: (info: {
+    parse_error: string;
+    raw_excerpt: string;
+    raw_length: number;
+    expected_schema?: string;
+  }) => void;
 };
 
 export interface AIProvider {

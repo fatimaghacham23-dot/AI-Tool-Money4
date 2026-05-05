@@ -32,6 +32,8 @@ import {
   evidenceStatusLabel,
   evidenceStatusVariant,
   FACTORY_STATUS_OPTIONS,
+  FINAL_DECISION_OPTIONS,
+  finalDecisionLabel,
   factoryStatusLabel,
   filterFactoryProductIdeas,
   getBuyerOptions,
@@ -46,6 +48,7 @@ import { cn, formatDate } from "@/lib/utils";
 
 const defaultFilters: FactoryFilters = {
   status: "all",
+  finalDecision: "all",
   buyerType: "all",
   scoreRange: "all",
   evidenceBackedOnly: false,
@@ -135,7 +138,7 @@ export function FactoryDashboard({
         />
         <OverviewCard
           icon={Trophy}
-          label="Winners selected"
+          label="Build-now winners"
           value={overview.winnersSelected}
         />
         <OverviewCard
@@ -155,12 +158,12 @@ export function FactoryDashboard({
         />
         <OverviewCard
           icon={Star}
-          label="Average score"
+          label="Average Day-One Probability"
           value={overview.averageScore === null ? "Pending" : `${overview.averageScore}/100`}
         />
         <OverviewCard
           icon={Trophy}
-          label="Highest scoring idea"
+          label="Highest Day-One Probability"
           value={
             overview.highestScoringIdea
               ? `${overview.highestScoringIdea.score?.total_score ?? "?"}/100`
@@ -172,7 +175,7 @@ export function FactoryDashboard({
       </section>
 
       <section className="rounded-lg border border-border bg-card p-5">
-        <div className="grid gap-4 lg:grid-cols-4">
+        <div className="grid gap-4 lg:grid-cols-5">
           <FilterField label="Status">
             <Select
               value={filters.status ?? "all"}
@@ -184,6 +187,23 @@ export function FactoryDashboard({
               {FACTORY_STATUS_OPTIONS.map((status) => (
                 <option key={status.value} value={status.value}>
                   {status.label}
+                </option>
+              ))}
+            </Select>
+          </FilterField>
+          <FilterField label="Decision">
+            <Select
+              value={filters.finalDecision ?? "all"}
+              onChange={(event) =>
+                setFilter(
+                  "finalDecision",
+                  event.currentTarget.value as FactoryFilters["finalDecision"],
+                )
+              }
+            >
+              {FINAL_DECISION_OPTIONS.map((decision) => (
+                <option key={decision.value} value={decision.value}>
+                  {decision.label}
                 </option>
               ))}
             </Select>
@@ -238,7 +258,7 @@ export function FactoryDashboard({
           />
           <FilterToggle
             checked={Boolean(filters.highLinkedInVirality)}
-            label="High LinkedIn virality"
+            label="Strong LinkedIn demo"
             onChange={(checked) => setFilter("highLinkedInVirality", checked)}
           />
           <FilterToggle
@@ -248,7 +268,7 @@ export function FactoryDashboard({
           />
           <FilterToggle
             checked={Boolean(filters.highPricePotential)}
-            label="High price potential"
+            label="Believable price"
             onChange={(checked) => setFilter("highPricePotential", checked)}
           />
         </div>
@@ -274,18 +294,19 @@ export function FactoryDashboard({
 
         {filteredIdeas.length ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1520px] border-collapse text-sm">
+            <table className="w-full min-w-[1600px] border-collapse text-sm">
               <thead className="bg-muted/70 text-left text-xs uppercase text-muted-foreground">
                 <tr>
                   <th className="px-4 py-3">Product name</th>
                   <th className="px-4 py-3">Council run</th>
+                  <th className="px-4 py-3">Decision</th>
                   <th className="px-4 py-3">Target buyer</th>
-                  <th className="px-4 py-3">Total score</th>
+                  <th className="px-4 py-3">Day-One Probability</th>
                   <th className="px-4 py-3">Evidence status</th>
                   <th className="px-4 py-3">Execution status</th>
-                  <th className="px-4 py-3">Price potential</th>
+                  <th className="px-4 py-3">Price believability</th>
                   <th className="px-4 py-3">Build speed</th>
-                  <th className="px-4 py-3">LinkedIn virality</th>
+                  <th className="px-4 py-3">LinkedIn demo</th>
                   <th className="px-4 py-3">Created date</th>
                   <th className="px-4 py-3">Actions</th>
                 </tr>
@@ -312,6 +333,9 @@ export function FactoryDashboard({
                         {idea.councilRun.title}
                       </Link>
                     </td>
+                    <td className="px-4 py-4 text-muted-foreground">
+                      {finalDecisionLabel(idea.finalReport?.final_decision)}
+                    </td>
                     <td className="max-w-[230px] px-4 py-4 text-muted-foreground">
                       {idea.target_buyer ?? idea.councilRun.target_buyer ?? "Open"}
                     </td>
@@ -326,9 +350,9 @@ export function FactoryDashboard({
                     <td className="px-4 py-4 text-muted-foreground">
                       {idea.executionPlan?.status.replaceAll("_", " ") ?? "No plan"}
                     </td>
-                    <ScoreCell value={idea.score?.price_potential ?? null} />
+                    <ScoreCell value={idea.score?.price_believability ?? null} />
                     <ScoreCell value={idea.score?.build_speed ?? null} />
-                    <ScoreCell value={idea.score?.linkedin_virality ?? null} />
+                    <ScoreCell value={idea.score?.linkedin_demo_strength ?? null} />
                     <td className="px-4 py-4 text-muted-foreground">
                       {formatDate(idea.created_at)}
                     </td>

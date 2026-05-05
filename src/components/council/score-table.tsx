@@ -26,7 +26,7 @@ export function ScoreTable({ ideas }: { ideas: ProductIdeaView[] }) {
               </th>
             ))}
             <th className="px-3 py-3">Rationale</th>
-            <th className="px-3 py-3 text-right">Total</th>
+            <th className="px-3 py-3 text-right">Day-One Probability</th>
           </tr>
         </thead>
         <tbody>

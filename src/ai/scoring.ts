@@ -7,87 +7,88 @@ import type {
 
 export type RubricKey = Exclude<keyof ProductScore, "productIdeaId" | "total_score">;
 
+export const DAY_ONE_BUILD_THRESHOLD = 85;
+
 export const SCORING_RUBRIC: Array<{
   key: RubricKey;
   label: string;
   description: string;
 }> = [
   {
-    key: "buyer_demand",
-    label: "Buyer Demand",
-    description: "How clearly a real buyer already wants this outcome.",
+    key: "buyer_urgency",
+    label: "Buyer Urgency",
+    description: "How painful/urgent the problem is right now for a real buyer.",
   },
   {
-    key: "linkedin_virality",
-    label: "LinkedIn Virality",
-    description: "How compelling the product looks in a post or short demo.",
+    key: "existing_purchase_behavior",
+    label: "Existing Purchase Behavior",
+    description:
+      "Whether buyers already pay for workarounds, services, contractors, or indirect tools for this pain.",
   },
   {
-    key: "source_code_resale_value",
-    label: "Source-Code Resale Value",
-    description: "Whether the code package itself feels worth purchasing.",
+    key: "linkedin_demo_strength",
+    label: "LinkedIn Demo Strength",
+    description: "How likely a post/demo generates clear wow + instant understanding.",
+  },
+  {
+    key: "comment_dm_likelihood",
+    label: "Comment/DM Likelihood",
+    description: "Likelihood of comments/DMs like: code / price / send me / I need this.",
+  },
+  {
+    key: "actual_tool_gap",
+    label: "Actual Tool Gap",
+    description: "Whether this exact tool is not already a common SaaS/tool category in the market.",
+  },
+  {
+    key: "source_code_gap",
+    label: "Source-Code Kit Gap",
+    description: "Whether there is no obvious polished source-code kit for this exact workflow.",
+  },
+  {
+    key: "manual_workaround_pain",
+    label: "Manual Workaround Pain",
+    description:
+      "Whether buyers currently do this manually (docs/spreadsheets/Slack/Notion/email/screenshots/repetition) and lose time/money.",
+  },
+  {
+    key: "hidden_workflow_specificity",
+    label: "Hidden Workflow Specificity",
+    description: "Whether the idea targets a specific workflow vs a generic broad category.",
+  },
+  {
+    key: "price_believability",
+    label: "Price Believability",
+    description: "Whether a one-time price feels believable for this buyer today.",
   },
   {
     key: "build_speed",
     label: "Build Speed",
-    description: "How realistically Ahmad can build a high-quality V1 quickly.",
-  },
-  {
-    key: "demo_quality",
-    label: "Demo Quality",
-    description: "How visual and concrete the demo can be.",
-  },
-  {
-    key: "ai_value",
-    label: "AI Usefulness",
-    description: "How much AI improves the workflow beyond a normal CRUD app.",
-  },
-  {
-    key: "customization_potential",
-    label: "Customization Potential",
-    description: "How easily buyers can adapt it to niches or clients.",
-  },
-  {
-    key: "competition_weakness",
-    label: "Competition Weakness",
-    description: "Whether existing alternatives are weak, expensive, or generic.",
-  },
-  {
-    key: "price_potential",
-    label: "Price Potential",
-    description: "How confidently the source package can command a premium.",
-  },
-  {
-    key: "ahmad_founder_fit",
-    label: "Ahmad Founder Fit",
-    description: "Fit with Ahmad as a software engineer selling on LinkedIn.",
+    description: "How quickly Ahmad can build a sellable v0/v1 to support validation.",
   },
 ];
 
 export const DEFAULT_SCORE_EXPLANATIONS: ProductScoreExplanations = {
-  buyer_demand: "Buyer demand is plausible for source-code buyers in this niche.",
-  linkedin_virality: "The idea can be explained in a visible LinkedIn demo.",
-  source_code_resale_value:
-    "The source code has reusable implementation value beyond a hosted app.",
-  build_speed: "A focused MVP is realistic for one engineer in the requested window.",
-  demo_quality: "The product has a before-and-after workflow that can be shown quickly.",
-  ai_value: "AI helps produce or analyze useful output inside the core workflow.",
-  customization_potential:
-    "Buyers can adapt branding, prompts, schema, and workflows for niches.",
-  competition_weakness:
-    "Existing alternatives are generic, subscription-only, or not source-code packages.",
-  price_potential:
-    "The package can justify a meaningful one-time source-code price.",
-  ahmad_founder_fit:
-    "The idea fits Ahmad's engineering strengths and LinkedIn audience.",
+  buyer_urgency: "The buyer pain is urgent enough to justify action today.",
+  existing_purchase_behavior:
+    "Buyers already spend money (tools, contractors, services) or time on workarounds for this problem.",
+  linkedin_demo_strength: "The product can be shown in a sharp before/after demo.",
+  comment_dm_likelihood:
+    "The post is likely to trigger comments/DMs like 'price' or 'send me the code'.",
+  actual_tool_gap: "This exact tool is not already common as a polished SaaS or generic AI tool.",
+  source_code_gap: "There is no obvious existing source-code kit that already solves this workflow well.",
+  manual_workaround_pain: "Buyers currently solve this manually and waste time/money (workarounds).",
+  hidden_workflow_specificity: "The workflow is specific and non-generic (not just 'an AI generator').",
+  price_believability: "A one-time price is believable for this buyer and urgency.",
+  build_speed: "Ahmad can ship a sellable validation-ready version quickly.",
 };
 
 export function clampScore(value: number) {
   if (Number.isNaN(value)) {
-    return 1;
+    return 0;
   }
 
-  return Math.min(10, Math.max(1, Math.round(value)));
+  return Math.min(10, Math.max(0, Math.round(value)));
 }
 
 export function calculateTotalScore(score: Omit<ProductScore, "total_score">) {
@@ -132,18 +133,16 @@ export function scoreIdeasLocally<T extends { title: string; description: string
 ) {
   return ideas.map((idea, index) => {
     const text = `${idea.title} ${idea.description}`.toLowerCase();
+
     const ideaEvidence = evidenceForIdea(idea, evidence);
     const averageEvidenceStrength = averageStrength(ideaEvidence);
     const hasEvidence = ideaEvidence.length > 0;
-    const demandEvidence = ideaEvidence.some((item) =>
-      ["pain", "demand", "buyer_comment", "willingness_to_pay"].includes(
-        item.signalType,
-      ),
+    const urgencyEvidence = ideaEvidence.some((item) =>
+      ["pain", "demand", "buyer_comment", "willingness_to_pay"].includes(item.signalType),
     );
-    const competitorEvidence = ideaEvidence.some(
-      (item) =>
-        item.signalType === "competitor_weakness" ||
-        item.sourceType === "competitor",
+    const purchaseBehaviorEvidence = ideaEvidence.some((item) =>
+      ["willingness_to_pay", "pricing_signal"].includes(item.signalType) ||
+      item.sourceType === "competitor",
     );
     const linkedinEvidence = ideaEvidence.some(
       (item) => item.sourceType === "linkedin" || item.signalType === "buyer_comment",
@@ -160,21 +159,25 @@ export function scoreIdeasLocally<T extends { title: string; description: string
       : -1;
     const agencyBonus = /agency|client|portal|proposal|dashboard/.test(text) ? 1 : 0;
     const sourceBonus = /template|starter|source|white-label|portal/.test(text) ? 1 : 0;
-    const aiBonus = /ai|agent|generator|analyzer|automation/.test(text) ? 1 : 0;
+    const demoBonus = /before.*after|demo|video|screenshot|viral|linkedin/.test(text) ? 1 : 0;
     const scopePenalty = /marketplace|platform|crm/.test(text) ? 1 : 0;
     const freshness = Math.max(0, 2 - Math.floor(index / 5));
 
+    const nicheBonus = /for\s+(lawyers|dentists|real estate|agenc|recruit|coach|consult)/.test(text)
+      ? 1
+      : 0;
+
     return normalizeScore({
-      buyer_demand: 7 + agencyBonus + evidenceBonus + (demandEvidence ? 1 : 0),
-      linkedin_virality: 7 + aiBonus + (linkedinEvidence ? 1 : 0),
-      source_code_resale_value: 7 + sourceBonus,
+      buyer_urgency: 7 + agencyBonus + evidenceBonus + (urgencyEvidence ? 1 : 0),
+      existing_purchase_behavior: 6 + evidenceBonus + (purchaseBehaviorEvidence ? 1 : 0),
+      linkedin_demo_strength: 7 + demoBonus + (linkedinEvidence ? 1 : 0),
+      comment_dm_likelihood: 7 + demoBonus + sourceBonus + (linkedinEvidence ? 1 : 0),
+      actual_tool_gap: 6 + freshness - (/(proposal generator|chatbot|content generator|resume|invoice|meeting|calendar|email assistant|website audit)/.test(text) ? 3 : 0),
+      source_code_gap: 6 + freshness - (sourceBonus ? 2 : 0),
+      manual_workaround_pain: 6 + evidenceBonus + (urgencyEvidence ? 1 : 0),
+      hidden_workflow_specificity: 6 + nicheBonus - (/(generator|assistant|chatbot|copilot)/.test(text) ? 2 : 0),
+      price_believability: 7 + agencyBonus + (priceEvidence ? 1 : 0),
       build_speed: 8 - scopePenalty,
-      demo_quality: 7 + aiBonus,
-      ai_value: 7 + aiBonus,
-      customization_potential: 7 + agencyBonus + sourceBonus,
-      competition_weakness: 6 + freshness + (competitorEvidence ? 1 : 0),
-      price_potential: 7 + agencyBonus + (priceEvidence ? 1 : 0),
-      ahmad_founder_fit: 8,
     });
   });
 }
@@ -184,46 +187,51 @@ export function explainScoresLocally<
 >(ideas: T[], evidence: MarketEvidenceDraft[] = []): ProductScoreExplanations[] {
   return ideas.map((idea) => {
     const text = `${idea.title} ${idea.description}`.toLowerCase();
+
     const ideaEvidence = evidenceForIdea(idea, evidence);
     const strongestEvidence = [...ideaEvidence].sort(
       (a, b) => b.strengthScore - a.strengthScore,
     )[0];
     const isAgency = /agency|client|portal|proposal/.test(text);
     const isTemplate = /template|starter|source|white-label|dashboard/.test(text);
+    const isGenericCategory =
+      /proposal generator|chatbot|content generator|resume|invoice|meeting summar|calendar|email assistant|website audit/.test(
+        text,
+      );
     const hasAI = /ai|agent|generator|analyzer|automation|copilot/.test(text);
+
     const evidencePhrase = strongestEvidence
       ? ` Evidence used: ${strongestEvidence.title} (${strongestEvidence.signalType}, ${strongestEvidence.strengthScore}/10).`
       : " No direct market evidence was provided, so this remains assumption-heavy.";
 
     return normalizeScoreExplanations({
-      buyer_demand: isAgency
-        ? `Agencies and freelancers repeatedly buy shortcuts for client-facing workflows.${evidencePhrase}`
-        : `Demand depends on sharp positioning, but the buyer pain is concrete enough to test.${evidencePhrase}`,
-      linkedin_virality: hasAI
-        ? `The demo can show AI transforming messy input into a finished client-ready artifact.${evidencePhrase}`
+      buyer_urgency: isAgency
+        ? `Agencies and freelancers feel client-facing workflow pain quickly, especially when it blocks delivery.${evidencePhrase}`
+        : `Urgency depends on sharper positioning, but the buyer pain is concrete enough to test.${evidencePhrase}`,
+      existing_purchase_behavior: isTemplate
+        ? `This resembles things buyers already pay for: starters, templates, code packages, or implementation shortcuts.${evidencePhrase}`
+        : `Purchase behavior still needs proof from paid alternatives, services, or source-code buyer comments.${evidencePhrase}`,
+      linkedin_demo_strength: hasAI
+        ? `The demo can show AI transforming messy input into a finished buyer-ready artifact.${evidencePhrase}`
         : `The demo needs a strong before-and-after to stop a LinkedIn scroll.${evidencePhrase}`,
-      source_code_resale_value: isTemplate
-        ? "The source package saves auth, schema, UI, prompts, and deployment setup time."
-        : "The code must include docs, seed data, and customization notes to feel worth buying.",
-      build_speed:
-        "A narrow V1 can ship by focusing on one main workflow and postponing integrations.",
-      demo_quality:
-        "The product can show input, AI processing, polished output, and source-code packaging.",
-      ai_value: hasAI
-        ? "AI is useful because it creates analysis, summaries, drafts, or recommendations."
-        : "AI must be tied to a real workflow rather than added as decorative automation.",
-      customization_potential: isAgency
-        ? "Agencies can rebrand, tune prompts, and adapt the data model for client niches."
-        : "Customization value comes from editable prompts, schema, and UI sections.",
-      competition_weakness:
-        ideaEvidence.some((item) => item.signalType === "competitor_weakness")
-          ? `Competitor evidence suggests a gap buyers may care about.${evidencePhrase}`
-          : `Most alternatives may be subscription-only, but competitor weakness still needs proof.${evidencePhrase}`,
-      price_potential: isAgency
-        ? "Agency resale use supports higher Pro and Agency license pricing."
-        : "Pricing needs a clear promise of saved engineering time.",
-      ahmad_founder_fit:
-        "Ahmad can credibly sell this as a software engineer showing real architecture and code.",
+      comment_dm_likelihood:
+        "The post must make the package concrete enough to earn comments or DMs asking for code, price, or demo access.",
+      actual_tool_gap: isGenericCategory
+        ? "This resembles a common category; it must be narrowed to a specific unsolved workflow gap to qualify."
+        : `The opportunity should be a niche workflow where no obvious dedicated tool already dominates.${evidencePhrase}`,
+      source_code_gap: isTemplate
+        ? "This resembles a common kit/template pattern; the source-code gap may be weak unless the workflow is unusually specific."
+        : "A viable idea has no obvious polished kit already solving this exact workflow end-to-end.",
+      manual_workaround_pain:
+        "The best opportunities replace repetitive manual work (spreadsheets, docs, Slack, Notion, email, screenshots, copying) that buyers complain about.",
+      hidden_workflow_specificity:
+        isGenericCategory
+          ? "This must be reframed as a very specific hidden workflow (not a generic AI wrapper) to score well."
+          : "The workflow should be specific enough that the demo is instantly understood and feels new.",
+      price_believability: isAgency
+        ? "Agency resale use makes a one-time source-code price more believable."
+        : "Pricing needs a clear promise of saved engineering time and faster validation.",
+      build_speed: "A narrow V1 can ship by focusing on one main workflow and postponing integrations.",
     });
   });
 }

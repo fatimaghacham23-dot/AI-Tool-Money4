@@ -44,8 +44,8 @@ export default async function ExecutionPage({
         </Button>
         <Card>
           <CardContent className="p-8 text-center text-sm leading-6 text-muted-foreground">
-            The execution plan will appear after the Judge Agent chooses a winner and
-            the final report is generated.
+            The execution plan appears only after the Judge Agent selects Build now
+            with an 85+ Day-One Sale Probability.
           </CardContent>
         </Card>
       </div>
@@ -73,7 +73,7 @@ export default async function ExecutionPage({
             Execution Plan
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            The winning council report converted into validation, build, packaging,
+            A build-now council report converted into validation, build, packaging,
             and LinkedIn launch work.
           </p>
         </div>
@@ -100,7 +100,9 @@ export default async function ExecutionPage({
             </p>
           </div>
           <div className="rounded-lg border border-secondary/30 bg-background/45 px-6 py-5 text-center">
-            <p className="text-xs uppercase text-muted-foreground">Total score</p>
+            <p className="text-xs uppercase text-muted-foreground">
+              Day-One Sale Probability
+            </p>
             <p className="mt-1 text-4xl font-semibold text-secondary">
               {winner.score?.total_score ?? "?"}/100
             </p>

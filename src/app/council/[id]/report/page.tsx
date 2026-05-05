@@ -14,6 +14,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { getCouncilRun } from "@/lib/data/council";
+import type { PreSellPack } from "@/ai/types";
+import type { FinalDecision, Json } from "@/types/database";
 
 export default async function ReportPage({
   params,
@@ -26,6 +28,15 @@ export default async function ReportPage({
   const evidenceBacked =
     council.marketEvidence.length > 0 ||
     Boolean(council.run.market_evidence_notes?.trim());
+  const topScoredIdea = [...council.ideas]
+    .filter((idea) => idea.score)
+    .sort((a, b) => (b.score?.total_score ?? 0) - (a.score?.total_score ?? 0))[0] ?? null;
+  const spotlightIdea = council.winner ?? topScoredIdea;
+  const finalDecision =
+    report?.final_decision ?? (council.winner ? "build_now" : null);
+  const dayOneSaleProbability =
+    report?.day_one_sale_probability ?? spotlightIdea?.score?.total_score ?? null;
+  const preSellPack = readPreSellPack(report?.pre_sell_pack);
 
   return (
     <div className="space-y-6">
@@ -41,7 +52,7 @@ export default async function ReportPage({
             Final Report
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            One winning full-source-code product, with build plan and sales assets.
+            The build gate decision, Day-One Sale Probability, and sales validation assets.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -51,34 +62,38 @@ export default async function ReportPage({
               Debate transcript
             </Link>
           </Button>
-          <Button asChild>
-            <Link href={`/council/${id}/execution`}>
-              <ClipboardCheck aria-hidden="true" />
-              Open Execution Plan
-            </Link>
-          </Button>
+          {council.winner ? (
+            <Button asChild>
+              <Link href={`/council/${id}/execution`}>
+                <ClipboardCheck aria-hidden="true" />
+                Open Execution Plan
+              </Link>
+            </Button>
+          ) : null}
         </div>
       </div>
 
-      {council.winner ? (
+      {spotlightIdea ? (
         <section className="rounded-lg border border-secondary/40 bg-secondary/12 p-6">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <div className="flex items-center gap-2 text-sm font-medium text-secondary">
                 <Trophy className="size-4" aria-hidden="true" />
-                Build this first
+                {finalDecision ? decisionHeading(finalDecision) : "Top scored candidate"}
               </div>
               <h2 className="mt-3 text-3xl font-semibold tracking-normal">
-                {council.winner.title}
+                {spotlightIdea.title}
               </h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-                {council.winner.description}
+                {spotlightIdea.description}
               </p>
             </div>
             <div className="rounded-lg border border-secondary/30 bg-background/45 px-6 py-5 text-center">
-              <p className="text-xs uppercase text-muted-foreground">Score</p>
+              <p className="text-xs uppercase text-muted-foreground">
+                Day-One Sale Probability
+              </p>
               <p className="mt-1 text-4xl font-semibold text-secondary">
-                {council.winner.score?.total_score ?? "?"}/100
+                {dayOneSaleProbability ?? "?"}/100
               </p>
             </div>
           </div>
@@ -88,7 +103,9 @@ export default async function ReportPage({
       <Card>
         <CardHeader>
           <CardTitle>Score Breakdown</CardTitle>
-          <CardDescription>The final shortlist ranked by the council rubric.</CardDescription>
+          <CardDescription>
+            The final shortlist ranked by Day-One Sale Probability.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <ScoreTable ideas={council.ideas} />
@@ -152,7 +169,10 @@ export default async function ReportPage({
             reportMarkdown={report.report_markdown}
             linkedinPost={report.linkedin_post}
             dmScript={report.dm_script}
+            preSellPack={preSellPack}
           />
+
+          {preSellPack ? <PreSellPackSection pack={preSellPack} /> : null}
 
           <MarkdownReport markdown={report.report_markdown} />
 
@@ -198,4 +218,91 @@ export default async function ReportPage({
       )}
     </div>
   );
+}
+
+function decisionHeading(decision: FinalDecision) {
+  switch (decision) {
+    case "build_now":
+      return "Build now";
+    case "reject_all":
+      return "Reject all";
+    case "validate_first":
+    default:
+      return "Validate first / Do not build yet";
+  }
+}
+
+function PreSellPackSection({ pack }: { pack: PreSellPack }) {
+  return (
+    <section className="rounded-lg border border-border bg-card">
+      <div className="border-b border-border p-5">
+        <h2 className="text-xl font-semibold tracking-normal">Pre-Sell Pack</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Validation copy and go/no-go assets for fast buyer signal before build time.
+        </p>
+      </div>
+      <div className="grid gap-4 p-5 lg:grid-cols-2">
+        <AssetBlock title="LinkedIn Validation Post" value={pack.validationPost} />
+        <AssetBlock title="Teaser Post" value={pack.teaserPost} />
+        <AssetBlock title="DM Reply" value={pack.dmReply} />
+        <AssetBlock title="Follow-Up DM" value={pack.followUpDm} />
+        <AssetBlock title="Payment Link Message" value={pack.paymentLinkMessage} />
+        <AssetBlock title="30-Second Demo Script" value={pack.demoScript30s} />
+        <div className="rounded-lg border border-border bg-background/35 p-4">
+          <h3 className="font-semibold tracking-normal">Screenshot Checklist</h3>
+          <ul className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
+            {pack.screenshotChecklist.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+        <AssetBlock title="Go/No-Go Threshold" value={pack.goNoGoRule} />
+      </div>
+    </section>
+  );
+}
+
+function AssetBlock({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-background/35 p-4">
+      <h3 className="font-semibold tracking-normal">{title}</h3>
+      <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function readPreSellPack(value: Json | undefined): PreSellPack | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const candidate = value as Record<string, Json | undefined>;
+  const screenshotChecklist = Array.isArray(candidate.screenshotChecklist)
+    ? candidate.screenshotChecklist.filter(
+        (item): item is string => typeof item === "string" && item.trim().length > 0,
+      )
+    : [];
+
+  const pack = {
+    validationPost: readString(candidate.validationPost),
+    teaserPost: readString(candidate.teaserPost),
+    dmReply: readString(candidate.dmReply),
+    followUpDm: readString(candidate.followUpDm),
+    paymentLinkMessage: readString(candidate.paymentLinkMessage),
+    screenshotChecklist,
+    demoScript30s: readString(candidate.demoScript30s),
+    goNoGoRule: readString(candidate.goNoGoRule),
+  };
+
+  return Object.values(pack).some((item) =>
+    Array.isArray(item) ? item.length > 0 : item.length > 0,
+  )
+    ? pack
+    : null;
+}
+
+function readString(value: Json | undefined) {
+  return typeof value === "string" ? value : "";
 }

@@ -18,6 +18,7 @@ export type DashboardRun = {
   title: string;
   status: CouncilRunRow["status"];
   winnerProduct: string | null;
+  finalDecision: FinalReportRow["final_decision"] | null;
   totalScore: number | null;
   createdAt: string;
   evidenceCount: number;
@@ -90,6 +91,7 @@ export type FactoryOverview = {
 
 export type FactoryFilters = {
   status?: FactoryStatus | "all";
+  finalDecision?: FinalReportRow["final_decision"] | "all";
   buyerType?: string;
   scoreRange?: "all" | "90-100" | "80-89" | "70-79" | "under-70";
   evidenceBackedOnly?: boolean;

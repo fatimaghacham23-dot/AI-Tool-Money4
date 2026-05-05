@@ -94,13 +94,13 @@ export default async function ProductFactoryDetailPage({
         />
         <Snapshot
           icon={Trophy}
-          label="Total score"
+          label="Day-One Probability"
           value={idea.score ? `${idea.score.total_score}/100` : "Pending"}
         />
         <Snapshot
           icon={DollarSign}
-          label="Price potential"
-          value={idea.score ? `${idea.score.price_potential}/10` : "Pending"}
+          label="Price believability"
+          value={idea.score ? `${idea.score.price_believability}/10` : "Pending"}
         />
         <Snapshot
           icon={ShieldCheck}
@@ -129,7 +129,7 @@ export default async function ProductFactoryDetailPage({
         <div className="border-b border-border p-5">
           <h2 className="text-xl font-semibold tracking-normal">Score Breakdown</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Council scoring, with the explanation attached to each criterion.
+            Day-One Sale Probability scoring, with the explanation attached to each criterion.
           </p>
         </div>
         {idea.score ? (

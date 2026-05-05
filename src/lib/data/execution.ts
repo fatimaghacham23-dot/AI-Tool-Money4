@@ -202,7 +202,7 @@ export async function regenerateSalesAssetsForPlan(planId: string) {
   const council = await getCouncilRun(plan.council_run_id);
 
   if (!council.winner || !council.report) {
-    throw new Error("Cannot regenerate assets before the council has a winner and report.");
+    throw new Error("Cannot regenerate assets before the council has a Build now decision and report.");
   }
 
   const draftAssets = generateSalesAssetsDraft({

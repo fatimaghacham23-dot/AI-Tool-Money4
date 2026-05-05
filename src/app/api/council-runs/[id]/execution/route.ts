@@ -11,7 +11,7 @@ export async function GET(
 
   if (!executionPlan) {
     return NextResponse.json(
-      { error: "Execution plan is not available until the council has a winner and report." },
+      { error: "Execution plan is not available until the council has a Build now decision at 85+ Day-One Sale Probability." },
       { status: 404 },
     );
   }
@@ -28,7 +28,7 @@ export async function POST(
 
   if (!executionPlan) {
     return NextResponse.json(
-      { error: "Execution plan is not available until the council has a winner and report." },
+      { error: "Execution plan is not available until the council has a Build now decision at 85+ Day-One Sale Probability." },
       { status: 404 },
     );
   }

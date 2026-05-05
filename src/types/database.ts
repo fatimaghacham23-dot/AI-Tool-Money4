@@ -34,6 +34,7 @@ export type ExecutionPlanStatus =
   | "paused";
 export type ExecutionTaskStatus = "todo" | "doing" | "done" | "skipped";
 export type ExecutionTaskPriority = "high" | "medium" | "low";
+export type FinalDecision = "build_now" | "validate_first" | "reject_all";
 
 export type Database = {
   public: {
@@ -178,6 +179,22 @@ export type CouncilRunRow = {
   market_evidence_notes: string | null;
   status: CouncilRunStatus;
   winner_product_id: string | null;
+  error_message: string | null;
+  failed_step: string | null;
+  failed_round: string | null;
+  failed_agent: string | null;
+  failed_provider: string | null;
+  failed_model: string | null;
+  debug_trace: Json | null;
+  current_round: string | null;
+  current_agent: string | null;
+  current_step: string | null;
+  current_provider: string | null;
+  current_model: string | null;
+  progress_percent: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -197,6 +214,22 @@ export type CouncilRunInsert = {
   market_evidence_notes?: string | null;
   status?: CouncilRunStatus;
   winner_product_id?: string | null;
+  error_message?: string | null;
+  failed_step?: string | null;
+  failed_round?: string | null;
+  failed_agent?: string | null;
+  failed_provider?: string | null;
+  failed_model?: string | null;
+  debug_trace?: Json | null;
+  current_round?: string | null;
+  current_agent?: string | null;
+  current_step?: string | null;
+  current_provider?: string | null;
+  current_model?: string | null;
+  progress_percent?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  failed_at?: string | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -224,6 +257,8 @@ export type AgentMessageRow = {
   council_run_id: string;
   debate_round_id: string;
   agent_id: string | null;
+  model_provider: string | null;
+  model_name: string | null;
   content: string;
   created_at: string;
 };
@@ -233,6 +268,8 @@ export type AgentMessageInsert = {
   council_run_id: string;
   debate_round_id: string;
   agent_id?: string | null;
+  model_provider?: string | null;
+  model_name?: string | null;
   content: string;
   created_at?: string;
 };
@@ -286,16 +323,16 @@ export type ProductIdeaInsert = {
 export type ProductScoreRow = {
   id: string;
   product_idea_id: string;
-  buyer_demand: number;
-  linkedin_virality: number;
-  source_code_resale_value: number;
+  buyer_urgency: number;
+  existing_purchase_behavior: number;
+  linkedin_demo_strength: number;
+  comment_dm_likelihood: number;
+  actual_tool_gap: number;
+  source_code_gap: number;
+  manual_workaround_pain: number;
+  hidden_workflow_specificity: number;
+  price_believability: number;
   build_speed: number;
-  demo_quality: number;
-  ai_value: number;
-  customization_potential: number;
-  competition_weakness: number;
-  price_potential: number;
-  ahmad_founder_fit: number;
   total_score: number;
   score_explanations: Json;
 };
@@ -303,16 +340,16 @@ export type ProductScoreRow = {
 export type ProductScoreInsert = {
   id?: string;
   product_idea_id: string;
-  buyer_demand: number;
-  linkedin_virality: number;
-  source_code_resale_value: number;
+  buyer_urgency: number;
+  existing_purchase_behavior: number;
+  linkedin_demo_strength: number;
+  comment_dm_likelihood: number;
+  actual_tool_gap: number;
+  source_code_gap: number;
+  manual_workaround_pain: number;
+  hidden_workflow_specificity: number;
+  price_believability: number;
   build_speed: number;
-  demo_quality: number;
-  ai_value: number;
-  customization_potential: number;
-  competition_weakness: number;
-  price_potential: number;
-  ahmad_founder_fit: number;
   total_score: number;
   score_explanations?: Json;
 };
@@ -348,26 +385,32 @@ export type MarketEvidenceInsert = {
 export type FinalReportRow = {
   id: string;
   council_run_id: string;
-  winner_product_id: string;
+  winner_product_id: string | null;
+  final_decision: FinalDecision;
+  day_one_sale_probability: number;
   report_markdown: string;
   linkedin_post: string;
   dm_script: string;
   demo_video_script: string;
   build_plan: Json;
   packaging_checklist: string[];
+  pre_sell_pack: Json;
   created_at: string;
 };
 
 export type FinalReportInsert = {
   id?: string;
   council_run_id: string;
-  winner_product_id: string;
+  winner_product_id?: string | null;
+  final_decision?: FinalDecision;
+  day_one_sale_probability?: number;
   report_markdown: string;
   linkedin_post: string;
   dm_script: string;
   demo_video_script: string;
   build_plan?: Json;
   packaging_checklist?: string[];
+  pre_sell_pack?: Json;
   created_at?: string;
 };
 

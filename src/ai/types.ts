@@ -3,6 +3,8 @@ import type { AgentRow, ProductIdeaStatus } from "@/types/database";
 export type AgentKey =
   | "source-code-market"
   | "linkedin-virality"
+  | "buyer-intent"
+  | "pre-sell"
   | "developer-buyer"
   | "agency-buyer"
   | "skeptic"
@@ -69,30 +71,30 @@ export type ProductIdeaDraft = {
 
 export type ProductScore = {
   productIdeaId?: string;
-  buyer_demand: number;
-  linkedin_virality: number;
-  source_code_resale_value: number;
+  buyer_urgency: number;
+  existing_purchase_behavior: number;
+  linkedin_demo_strength: number;
+  comment_dm_likelihood: number;
+  actual_tool_gap: number;
+  source_code_gap: number;
+  manual_workaround_pain: number;
+  hidden_workflow_specificity: number;
+  price_believability: number;
   build_speed: number;
-  demo_quality: number;
-  ai_value: number;
-  customization_potential: number;
-  competition_weakness: number;
-  price_potential: number;
-  ahmad_founder_fit: number;
   total_score: number;
 };
 
 export type ProductScoreExplanations = {
-  buyer_demand: string;
-  linkedin_virality: string;
-  source_code_resale_value: string;
+  buyer_urgency: string;
+  existing_purchase_behavior: string;
+  linkedin_demo_strength: string;
+  comment_dm_likelihood: string;
+  actual_tool_gap: string;
+  source_code_gap: string;
+  manual_workaround_pain: string;
+  hidden_workflow_specificity: string;
+  price_believability: string;
   build_speed: string;
-  demo_quality: string;
-  ai_value: string;
-  customization_potential: string;
-  competition_weakness: string;
-  price_potential: string;
-  ahmad_founder_fit: string;
 };
 
 export type ScoredProductIdea = ProductIdeaDraft & {
@@ -100,6 +102,19 @@ export type ScoredProductIdea = ProductIdeaDraft & {
   scoreReason?: string;
   scoreExplanations?: ProductScoreExplanations;
   lostReason?: string;
+};
+
+export type FinalDecision = "build_now" | "validate_first" | "reject_all";
+
+export type PreSellPack = {
+  validationPost: string;
+  teaserPost: string;
+  dmReply: string;
+  followUpDm: string;
+  paymentLinkMessage: string;
+  screenshotChecklist: string[];
+  demoScript30s: string;
+  goNoGoRule: string;
 };
 
 export type DebateRoundDraft = {
@@ -112,16 +127,21 @@ export type DebateMessageDraft = {
   roundId: string;
   agent: CouncilAgent;
   content: string;
+  provider?: string;
+  model?: string;
 };
 
 export type FinalReportDraft = {
   winnerProductId?: string;
+  finalDecision?: FinalDecision;
+  dayOneSaleProbability?: number;
   reportMarkdown: string;
   linkedinPost: string;
   dmScript: string;
   demoVideoScript: string;
   buildPlan: Array<{ day: string; focus: string; deliverable: string }>;
   packagingChecklist: string[];
+  preSellPack?: PreSellPack;
   codexBuildBlueprint?: string;
   codexPrompt?: string;
 };
@@ -176,6 +196,14 @@ export type DebateArtifacts = {
 
 export interface DebatePersistence {
   markRunStatus?(status: "running" | "completed" | "failed"): Promise<void>;
+  updateRunProgress?(progress: {
+    currentRound?: string | null;
+    currentAgent?: string | null;
+    currentStep?: string | null;
+    currentProvider?: string | null;
+    currentModel?: string | null;
+    progressPercent?: number | null;
+  }): Promise<void>;
   createRound(round: DebateRoundDraft): Promise<{ id: string }>;
   addMessage(message: DebateMessageDraft): Promise<void>;
   saveIdeas(ideas: ProductIdeaDraft[]): Promise<ProductIdeaDraft[]>;

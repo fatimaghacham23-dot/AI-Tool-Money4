@@ -63,6 +63,12 @@ export async function getDashboardRuns(): Promise<DashboardRun[]> {
     : { data: [] };
 
   const runIds = runs.map((run) => run.id);
+  const { data: reports } = runIds.length
+    ? await supabase
+        .from("final_reports")
+        .select("council_run_id,final_decision,day_one_sale_probability")
+        .in("council_run_id", runIds)
+    : { data: [] };
   const { data: evidence } = runIds.length
     ? await supabase
         .from("market_evidence")
@@ -71,15 +77,23 @@ export async function getDashboardRuns(): Promise<DashboardRun[]> {
     : { data: [] };
 
   return runs.map((run) => ({
+    ...(() => {
+      const report = reports?.find((item) => item.council_run_id === run.id);
+      const winnerScore =
+        scores?.find((score) => score.product_idea_id === run.winner_product_id)
+          ?.total_score ?? null;
+
+      return {
+        finalDecision: report?.final_decision ?? null,
+        totalScore: winnerScore ?? report?.day_one_sale_probability ?? null,
+      };
+    })(),
     id: run.id,
     title: run.title,
     status: run.status,
     winnerProduct:
       winners?.find((winner) => winner.id === run.winner_product_id)?.title ??
       null,
-    totalScore:
-      scores?.find((score) => score.product_idea_id === run.winner_product_id)
-        ?.total_score ?? null,
     createdAt: run.created_at,
     evidenceCount:
       evidence?.filter((item) => item.council_run_id === run.id).length ?? 0,

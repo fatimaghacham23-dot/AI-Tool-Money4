@@ -36,8 +36,9 @@ export default async function AgentSettingsPage() {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            Edit prompts carefully: the Judge Agent must always choose one product
-            only and clearly say &quot;Build this first.&quot;
+            Edit prompts carefully: the Judge Agent may only choose Build now at
+            85+ Day-One Sale Probability. Below that it must say
+            &quot;Validate first / Do not build yet.&quot;
           </p>
         </CardContent>
       </Card>

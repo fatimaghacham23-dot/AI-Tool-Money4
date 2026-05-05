@@ -7,3 +7,4 @@ dist
 *.tsbuildinfo
 supabase/.temp
 coverage
+.env.local

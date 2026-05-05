@@ -1,15 +1,11 @@
-import { ChevronLeft, FileText } from "lucide-react";
+import { ChevronLeft } from "lucide-react";
 import Link from "next/link";
 
-import { AgentIcon } from "@/components/council/agent-icon";
-import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  LiveDebateProgress,
+  type CouncilRunStatusPayload,
+} from "@/components/council/live-debate-progress";
+import { Button } from "@/components/ui/button";
 import { getCouncilRun } from "@/lib/data/council";
 
 export default async function DebatePage({
@@ -19,89 +15,74 @@ export default async function DebatePage({
 }) {
   const { id } = await params;
   const council = await getCouncilRun(id);
+  const initialStatus: CouncilRunStatusPayload = {
+    id: council.run.id,
+    status: council.run.status,
+    current_round: council.run.current_round,
+    current_agent: council.run.current_agent,
+    current_step: council.run.current_step,
+    current_provider: council.run.current_provider,
+    current_model: council.run.current_model,
+    progress_percent: council.run.progress_percent,
+    error_message: council.run.error_message,
+    failed_step: council.run.failed_step,
+    failed_round: council.run.failed_round,
+    failed_agent: council.run.failed_agent,
+    failed_provider: council.run.failed_provider,
+    failed_model: council.run.failed_model,
+    debug_trace: council.run.status === "failed" ? council.run.debug_trace : null,
+    rounds: council.rounds.map((round) => ({
+      id: round.id,
+      roundNumber: round.round_number,
+      roundType: round.round_type,
+      title: round.title,
+      createdAt: round.created_at,
+      messages: round.messages.map((message) => ({
+        id: message.id,
+        roundId: message.debate_round_id,
+        agentName: message.agent?.name ?? "Council system",
+        agentRole: message.agent?.role ?? "Automated debate event",
+        provider: message.model_provider ?? message.agent?.modelProvider ?? council.run.current_provider,
+        model: message.model_name ?? message.agent?.modelName ?? council.run.current_model,
+        content: message.content,
+        createdAt: message.created_at,
+      })),
+    })),
+    messages: council.rounds.flatMap((round) =>
+      round.messages.map((message) => ({
+        id: message.id,
+        roundId: message.debate_round_id,
+        agentName: message.agent?.name ?? "Council system",
+        agentRole: message.agent?.role ?? "Automated debate event",
+        provider: message.model_provider ?? message.agent?.modelProvider ?? council.run.current_provider,
+        model: message.model_name ?? message.agent?.modelName ?? council.run.current_model,
+        content: message.content,
+        createdAt: message.created_at,
+      })),
+    ),
+    productIdeasCount: council.ideas.length,
+    scoresCount: council.ideas.filter((idea) => idea.score).length,
+    hasFinalReport: Boolean(council.report),
+  };
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <Button asChild variant="ghost" size="sm" className="-ml-3">
-            <Link href={`/council/${id}`}>
-              <ChevronLeft aria-hidden="true" />
-              Overview
-            </Link>
-          </Button>
-          <h1 className="mt-3 text-3xl font-semibold tracking-normal">
-            Council Debate
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Messages are grouped by debate round so the decision trail stays auditable.
-          </p>
-        </div>
-        <Button asChild>
-          <Link href={`/council/${id}/report`}>
-            <FileText aria-hidden="true" />
-            Final report
+      <div>
+        <Button asChild variant="ghost" size="sm" className="-ml-3">
+          <Link href={`/council/${id}`}>
+            <ChevronLeft aria-hidden="true" />
+            Overview
           </Link>
         </Button>
+        <h1 className="mt-3 text-3xl font-semibold tracking-normal">
+          Council Debate
+        </h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+          Watch the seven-round council pipeline as messages, ideas, scores, and failures are saved.
+        </p>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[320px_1fr]">
-        <div className="space-y-3">
-          {council.agents.map((agent) => (
-            <Card key={agent.key} className="shadow-none">
-              <CardContent className="flex gap-3 p-4">
-                <AgentIcon agent={agent} />
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold">{agent.name}</p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    {agent.role}
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-
-        <div className="space-y-5">
-          {council.rounds.map((round) => (
-            <Card key={round.id}>
-              <CardHeader>
-                <CardTitle>{round.title}</CardTitle>
-                <CardDescription>{round.round_type.replaceAll("_", " ")}</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {round.messages.length ? (
-                  round.messages.map((message) => (
-                    <article
-                      key={message.id}
-                      className="rounded-lg border border-border bg-background/45 p-4"
-                    >
-                      <div className="flex items-center gap-3">
-                        <AgentIcon agent={message.agent} className="size-9" />
-                        <div>
-                          <p className="text-sm font-semibold">
-                            {message.agent?.name ?? "Council system"}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {message.agent?.role ?? "Automated debate event"}
-                          </p>
-                        </div>
-                      </div>
-                      <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">
-                        {message.content}
-                      </p>
-                    </article>
-                  ))
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    This round has not produced messages yet.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </div>
+      <LiveDebateProgress runId={id} initialStatus={initialStatus} />
     </div>
   );
 }

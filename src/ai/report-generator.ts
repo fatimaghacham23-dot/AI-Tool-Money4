@@ -1,8 +1,10 @@
-import { SCORING_RUBRIC } from "@/ai/scoring";
+import { DAY_ONE_BUILD_THRESHOLD, SCORING_RUBRIC } from "@/ai/scoring";
 import type {
   CouncilRunInput,
+  FinalDecision,
   FinalReportDraft,
   MarketEvidenceDraft,
+  PreSellPack,
   ProductIdeaDraft,
   ProductScoreExplanations,
   ScoredProductIdea,
@@ -40,6 +42,7 @@ export type ReportContext = {
   }>;
   marketEvidence?: MarketEvidenceDraft[];
   whyOthersLost?: Array<{ title: string; reason: string }>;
+  finalDecision?: FinalDecision;
   finalDecisionReason?: string;
 };
 
@@ -54,21 +57,29 @@ Create the final private council report for Ahmad.
 Goal:
 ${run.goal}
 
-Winner:
+Top candidate:
 ${JSON.stringify(winner, null, 2)}
 
 Council context:
 ${JSON.stringify(context, null, 2)}
 
 Rules:
-- Choose one product only.
-- Include the exact phrase: "Build this first."
+- Use the Judge final decision from context. Build now is only allowed at ${DAY_ONE_BUILD_THRESHOLD}+ Day-One Sale Probability.
+- If finalDecision is validate_first, include the exact phrase: "Validate first / Do not build yet."
+- If finalDecision is build_now, include the phrases: "Build now." and "Build this first."
+- If finalDecision is reject_all, include the exact phrase: "Reject all. Generate better hidden-gap ideas or add stronger market evidence." and make reportMarkdown start with "# Reject All".
+- For reject_all, do not invent a winner and do not write a validation plan for weak generic ideas. Explain why no idea passed, which hard gates failed, what hidden workflow to search for next, what evidence Ahmad should collect, and a better prompt for the next council run.
+- Do not call the product a winner unless finalDecision is build_now.
 - Optimize for a complete source-code package sold from LinkedIn, not a SaaS subscription.
 - Include why the other top ideas lost.
-- Use concrete architecture, schema, routes, UI pages, pricing, launch post, DM script, demo video script, and packaging checklist.
-- Return JSON with keys: reportMarkdown, linkedinPost, dmScript, demoVideoScript, buildPlan, packagingChecklist, codexBuildBlueprint, codexPrompt.
-- The reportMarkdown must use these sections:
-  # Build This First
+- The report must include the sections: # Existing Tool Check, # Hidden Workflow Gap, and # Fast Validation Test.
+- Add the Pre-Sell Pack: LinkedIn validation post, teaser post, DM reply, follow-up DM, payment link message, screenshot checklist, 30-second demo script, and go/no-go threshold.
+- Use concrete architecture, schema, routes, UI pages, pricing, launch/validation post, DM script, demo video script, and packaging checklist.
+- Return JSON with keys: finalDecision, dayOneSaleProbability, reportMarkdown, linkedinPost, dmScript, demoVideoScript, buildPlan, packagingChecklist, preSellPack, codexBuildBlueprint, codexPrompt.
+- Unless finalDecision is reject_all, the reportMarkdown must use these sections:
+  # Day-One Sale Decision
+  Final decision
+  Day-One Sale Probability
   Product name
   One-sentence offer
   Target buyer
@@ -88,9 +99,13 @@ Rules:
   LinkedIn launch post
   DM script
   Demo video script
+  Pre-Sell Pack
   Packaging checklist
   Risks
   Why rejected ideas lost
+  # Existing Tool Check
+  # Hidden Workflow Gap
+  # Fast Validation Test
   # Market Evidence Used
   # Codex Build Blueprint
 - The Codex Build Blueprint section must include Product Summary, MVP Scope, Recommended Tech Stack, App Pages, Database Schema, API Routes / Server Actions, AI Features, UI Components, Build Phases, Packaging for Source-Code Sale, and Codex Prompt.
@@ -104,8 +119,21 @@ export function createDeterministicReport(
   winner: ScoredProductIdea,
   context: ReportContext = {},
 ): FinalReportDraft {
+  const finalDecision = context.finalDecision ?? inferFinalDecision(winner);
+  const dayOneSaleProbability = winner.score.total_score;
+
+  if (finalDecision === "reject_all") {
+    return createRejectAllReport(run, winner, context, dayOneSaleProbability);
+  }
+
+  const decisionLabel = finalDecisionLabel(finalDecision);
+  const decisionPhrase =
+    finalDecision === "build_now"
+      ? "Build now. Build this first."
+      : "Validate first / Do not build yet.";
   const offer = `A complete ${winner.title} source-code package for ${winner.targetBuyer.toLowerCase()} that saves weeks of product setup.`;
   const demoHook = createDemoHook(winner);
+  const preSellPack = createPreSellPack(winner, demoHook, dayOneSaleProbability);
   const scoreRows = SCORING_RUBRIC.map((item) => {
     const value = winner.score[item.key];
     const explanation =
@@ -152,9 +180,15 @@ export function createDeterministicReport(
     evidenceAnalysis,
   });
 
-  const reportMarkdown = `# Build This First
+  const reportMarkdown = `# Day-One Sale Decision
 
-Build this first.
+${decisionPhrase}
+
+## Final Decision
+${decisionLabel}
+
+## Day-One Sale Probability
+${dayOneSaleProbability}/100
 
 ## Product Name
 ${winner.title}
@@ -181,7 +215,7 @@ ${demoHook}
 | Category | Score | Explanation |
 | --- | ---: | --- |
 ${scoreRows}
-| Total | ${winner.score.total_score}/100 | Best combined probability after council debate. |
+| Total | ${dayOneSaleProbability}/100 | Day-One Sale Probability after council debate. |
 
 ## MVP Features
 ${winner.mvpFeatures.map((feature) => `- ${feature}`).join("\n")}
@@ -249,6 +283,31 @@ ${createDMScript(winner)}
 ## Demo Video Script
 ${createDemoScript(winner, demoHook)}
 
+## Pre-Sell Pack
+### LinkedIn Validation Post
+${preSellPack.validationPost}
+
+### Teaser Post
+${preSellPack.teaserPost}
+
+### DM Reply
+${preSellPack.dmReply}
+
+### Follow-Up DM
+${preSellPack.followUpDm}
+
+### Payment Link Message
+${preSellPack.paymentLinkMessage}
+
+### Screenshot Checklist
+${preSellPack.screenshotChecklist.map((item) => `- ${item}`).join("\n")}
+
+### 30-Second Demo Script
+${preSellPack.demoScript30s}
+
+### Go/No-Go Threshold
+${preSellPack.goNoGoRule}
+
 ## Packaging Checklist
 - Clean README and install guide
 - .env.example with all required variables
@@ -266,9 +325,49 @@ ${risks.map((risk) => `- ${risk}`).join("\n")}
 ## Why Rejected Ideas Lost
 ${rejectedLosses.map((item) => `- ${item.title}: ${item.reason}`).join("\n")}
 
-# Market Evidence Used
+# Existing Tool Check
+## Does the exact tool already exist?
+This must be judged against the specific workflow, not the broad category. If this looks like a common SaaS/AI tool category, the council should treat the tool gap as weak.
 
-## Strongest Evidence
+## Are there similar SaaS tools?
+If similar tools are common, the value must come from a weirdly specific workflow gap, not a generic wrapper.
+
+## Are there similar source-code kits?
+If kits/templates are already common for this exact workflow, the source-code gap is weak and the idea should not win.
+
+## Is the idea too generic?
+If it resembles a generic generator/assistant/dashboard category, it must be narrowed to a hidden workflow.
+
+# Hidden Workflow Gap
+## Specific painful workflow
+${winner.pain}
+
+## Current manual workaround
+People likely handle this through docs/spreadsheets/Slack/Notion/email/screenshots and repetitive back-and-forth.
+
+## Why existing tools are weak
+Existing alternatives are often indirect, manual, generic, expensive, or incomplete for this specific workflow.
+
+## Why this tool is different
+It packages the workflow end-to-end with a demoable before/after, plus full source-code ownership.
+
+## Why buyer would care now
+Because it reduces delivery risk/time and replaces manual workarounds with a repeatable workflow.
+
+# Fast Validation Test
+## LinkedIn post
+${finalDecision === "build_now" ? createLinkedInPost(winner, demoHook) : preSellPack.validationPost}
+
+## DM script
+${finalDecision === "build_now" ? createDMScript(winner) : preSellPack.dmReply}
+
+## Buyer question list
+${createBuyerQuestions(winner).map((item) => `- ${item}`).join("\n")}
+
+## Go/no-go rule
+${preSellPack.goNoGoRule}
+
+# Market Evidence Used
 ${evidenceAnalysis.strongestEvidence.map((item) => `- ${item.title} (${item.sourceType}/${item.signalType}, ${item.strengthScore}/10): ${item.content}`).join("\n") || "- No direct market evidence was provided."}
 
 ## Weakest Assumptions
@@ -292,10 +391,18 @@ ${codexPrompt}
 
   return {
     winnerProductId: winner.id,
+    finalDecision,
+    dayOneSaleProbability,
     reportMarkdown,
-    linkedinPost: createLinkedInPost(winner, demoHook),
-    dmScript: createDMScript(winner),
-    demoVideoScript: createDemoScript(winner, demoHook),
+    linkedinPost:
+      finalDecision === "build_now"
+        ? createLinkedInPost(winner, demoHook)
+        : preSellPack.validationPost,
+    dmScript: finalDecision === "build_now" ? createDMScript(winner) : preSellPack.dmReply,
+    demoVideoScript:
+      finalDecision === "build_now"
+        ? createDemoScript(winner, demoHook)
+        : preSellPack.demoScript30s,
     buildPlan,
     packagingChecklist: [
       "Clean README and install guide",
@@ -308,8 +415,101 @@ ${codexPrompt}
       "Screenshots and short demo video",
       "Changelog and buyer handoff checklist",
     ],
+    preSellPack,
     codexBuildBlueprint: blueprint,
     codexPrompt,
+  };
+}
+
+function createRejectAllReport(
+  run: CouncilRunInput,
+  highestScoredIdea: ScoredProductIdea,
+  context: ReportContext,
+  dayOneSaleProbability: number,
+): FinalReportDraft {
+  const scoredIdeas = uniqueByTitle([
+    highestScoredIdea,
+    ...(context.scoredIdeas ?? []),
+  ]).sort((a, b) => b.score.total_score - a.score.total_score);
+  const failedGateRows = scoredIdeas.map((idea) => {
+    const failed = describeFailedHardGates(idea);
+    return `| ${idea.title} | ${idea.score.total_score}/100 | ${failed} |`;
+  });
+  const marketEvidence = context.marketEvidence ?? [];
+  const evidenceAnalysis = createMarketEvidenceAnalysis(highestScoredIdea, marketEvidence);
+  const nextPrompt = createBetterCouncilPrompt(run);
+  const nextWorkflowSearch = [
+    "A named back-office workflow that buyers currently solve with spreadsheets, docs, email, Slack, screenshots, or repeated manual handoffs.",
+    "A workflow narrow enough to demo in 30 seconds with a concrete before/after artifact.",
+    "A problem where existing SaaS tools are too broad, too expensive, too hard to customize, or do not sell source-code ownership.",
+    "A buyer segment with urgent language, visible complaints, and willingness to pay for implementation shortcuts.",
+  ];
+  const evidenceToCollect = [
+    "Five LinkedIn posts or comments where the target buyer complains about the exact workflow in their own words.",
+    "Three examples of current manual workarounds, including screenshots or quoted process notes when possible.",
+    "A competitor/tool check proving that exact workflow is not already solved well by common SaaS products or source-code kits.",
+    "At least three buyer DMs that mention urgency, budget, source-code ownership, client reuse, or implementation time saved.",
+    "One tiny mock demo or annotated screenshot that tests whether the workflow feels weirdly specific enough to earn replies.",
+  ];
+
+  const reportMarkdown = `# Reject All
+
+Reject all. Generate better hidden-gap ideas or add stronger market evidence.
+
+## Why No Idea Passed
+The scored shortlist did not produce a product with enough actual tool gap, hidden workflow specificity, and manual workaround pain to deserve build time or even a validation push. The highest-scored rejected idea was ${highestScoredIdea.title} at ${dayOneSaleProbability}/100, but the council should not treat it as a winner.
+
+## Hard Gates Failed
+| Idea | Day-One Sale Probability | Failed hard gates |
+| --- | ---: | --- |
+${failedGateRows.join("\n")}
+
+## What Kind Of Hidden Workflow To Search For Next
+${nextWorkflowSearch.map((item) => `- ${item}`).join("\n")}
+
+## New Market Evidence Ahmad Should Collect
+${evidenceToCollect.map((item) => `- ${item}`).join("\n")}
+
+## Better Prompt For Next Council Run
+\`\`\`text
+${nextPrompt}
+\`\`\`
+
+# Existing Tool Check
+Reject any idea that already exists as a common SaaS category, a common AI wrapper, or an obvious source-code template. The next run must prove the exact workflow gap, not just a broad product category.
+
+# Hidden Workflow Gap
+No shortlisted idea proved a sufficiently weird, specific, painful workflow. The next council should start from observed manual workarounds and buyer language before naming products.
+
+# Fast Validation Test
+Do not validate these rejected ideas. First collect stronger evidence, then run a new council with stricter inputs. A validation post is only useful after an idea clears actual_tool_gap, hidden_workflow_specificity, and manual_workaround_pain at 7/10 or higher.
+
+# Market Evidence Used
+${evidenceAnalysis.strongestEvidence.map((item) => `- ${item.title} (${item.sourceType}/${item.signalType}, ${item.strengthScore}/10): ${item.content}`).join("\n") || "- No direct market evidence was provided."}
+
+## Evidence Gaps
+${evidenceAnalysis.evidenceGaps.map((item) => `- ${item}`).join("\n")}
+
+# Codex Build Blueprint
+No build blueprint should be generated for this run. The correct next action is research: gather stronger market evidence, find a sharper hidden workflow, and rerun the council with the improved prompt above.
+`;
+
+  return {
+    winnerProductId: undefined,
+    finalDecision: "reject_all",
+    dayOneSaleProbability,
+    reportMarkdown,
+    linkedinPost:
+      "No launch post. Reject all and collect stronger hidden-workflow evidence before asking the market to validate an offer.",
+    dmScript:
+      "No sales DM. Ask research DMs instead: what workflow are you still doing manually, what have you tried, and would source-code ownership matter?",
+    demoVideoScript:
+      "No demo video. Build a tiny mock only after the next run finds a weirdly specific workflow that clears the hard gates.",
+    buildPlan: [],
+    packagingChecklist: [],
+    codexBuildBlueprint:
+      "No build blueprint. Gather stronger market evidence and rerun the council.",
+    codexPrompt: nextPrompt,
   };
 }
 
@@ -514,7 +714,8 @@ ${createBuyerQuestions(winner).map((item) => `  - ${item}`).join("\n")}
 - 5 comments/DMs that would count as positive validation:
 ${createPositiveValidationSignals(winner).map((item) => `  - ${item}`).join("\n")}
 - Minimum validation threshold before building:
-  - Before spending more than 2 days building, Ahmad should get at least 5 interested comments or 3 serious DMs.
+  - Build now only when Day-One Sale Probability is ${DAY_ONE_BUILD_THRESHOLD}+.
+  - If the score is below ${DAY_ONE_BUILD_THRESHOLD}, before spending more than 2 days building Ahmad should get at least 5 relevant comments or 3 serious DMs within 48 hours.
   - At least one signal should mention willingness to pay, source-code ownership, or agency/client reuse.
   - If only likes/views appear, keep researching before building.
 
@@ -1068,7 +1269,7 @@ function createRejectedLosses(winner: ScoredProductIdea, context: ReportContext)
       title: idea.title,
       reason:
         idea.lostReason ??
-        `Scored ${idea.score.total_score}/100, below ${winner.title} on the combined council rubric.`,
+        `Scored ${idea.score.total_score}/100, below ${winner.title} on Day-One Sale Probability.`,
     }));
 
   return uniqueByTitle([...explicitLosses, ...scoredLosses, ...rejected]).slice(0, 12);
@@ -1104,7 +1305,7 @@ function createMarketEvidenceAnalysis(
     strongestEvidence,
     weakestAssumptions: [
       hasWinnerEvidence
-        ? "The winner has at least some related evidence, but the exact offer still needs manual validation."
+        ? "The top candidate has at least some related evidence, but the exact offer still needs manual validation."
         : `No evidence directly names ${winner.title}; the council is extrapolating from adjacent pain.`,
       hasPricingEvidence
         ? "There is some pricing or willingness-to-pay signal, but package price still needs testing."
@@ -1161,8 +1362,127 @@ function createPositiveValidationSignals(winner: ScoredProductIdea) {
   ];
 }
 
+function inferFinalDecision(winner: ScoredProductIdea): FinalDecision {
+  const meetsGapRules =
+    winner.score.actual_tool_gap >= 7 &&
+    winner.score.hidden_workflow_specificity >= 7 &&
+    winner.score.manual_workaround_pain >= 7;
+
+  if (!meetsGapRules) {
+    return "reject_all";
+  }
+
+  return winner.score.total_score >= DAY_ONE_BUILD_THRESHOLD &&
+    winner.score.buyer_urgency >= 7 &&
+    winner.score.linkedin_demo_strength >= 7
+    ? "build_now"
+    : "validate_first";
+}
+
+function finalDecisionLabel(decision: FinalDecision) {
+  switch (decision) {
+    case "build_now":
+      return "Build now";
+    case "reject_all":
+      return "Reject all";
+    case "validate_first":
+    default:
+      return "Validate first";
+  }
+}
+
+function describeFailedHardGates(idea: ScoredProductIdea) {
+  const failed = [
+    idea.score.actual_tool_gap < 7
+      ? `actual_tool_gap ${idea.score.actual_tool_gap}/10`
+      : null,
+    idea.score.hidden_workflow_specificity < 7
+      ? `hidden_workflow_specificity ${idea.score.hidden_workflow_specificity}/10`
+      : null,
+    idea.score.manual_workaround_pain < 7
+      ? `manual_workaround_pain ${idea.score.manual_workaround_pain}/10`
+      : null,
+    idea.score.buyer_urgency < 7
+      ? `buyer_urgency ${idea.score.buyer_urgency}/10`
+      : null,
+    idea.score.linkedin_demo_strength < 7
+      ? `linkedin_demo_strength ${idea.score.linkedin_demo_strength}/10`
+      : null,
+  ].filter(Boolean);
+
+  return failed.length
+    ? failed.join("; ")
+    : `did not clear ${DAY_ONE_BUILD_THRESHOLD}+ build-now score with strong evidence`;
+}
+
+function createBetterCouncilPrompt(run: CouncilRunInput) {
+  return `Find 12 full-source-code products for ${run.targetBuyer ?? "a specific buyer segment"} that solve hidden workflow gaps, not generic product categories.
+
+Hard rules:
+- Each idea must name the exact manual workaround buyers use today.
+- Reject ideas that already exist in many SaaS forms or common source-code templates.
+- Keep only ideas with actual_tool_gap >= 7, hidden_workflow_specificity >= 7, and manual_workaround_pain >= 7.
+- Prefer weirdly specific demos that show a before/after workflow artifact in 30 seconds.
+- Include market evidence from LinkedIn comments, buyer DMs, competitor gaps, pricing signals, or screenshots.
+
+Original goal:
+${run.goal}`;
+}
+
 function createDemoHook(winner: ScoredProductIdea) {
   return `Start with ${winner.pain.toLowerCase()}, paste messy buyer input, generate the finished workflow artifact, then open the repo/docs to show buyers get the full source code.`;
+}
+
+function createPreSellPack(
+  winner: ScoredProductIdea,
+  demoHook: string,
+  dayOneSaleProbability: number,
+): PreSellPack {
+  return {
+    validationPost: `I am considering building a full-source-code package for ${winner.targetBuyer}.
+
+Problem:
+${winner.pain}
+
+The idea:
+${winner.title} - a buyer-ready codebase with the app, schema, AI prompts, docs, seed data, and license options.
+
+Before I build it, I want a real signal.
+
+Would owning the source code for this save you enough time to pay for it?
+
+Comment "code", "price", or "demo" and I will send the details.`,
+    teaserPost: `I am testing a source-code product for ${winner.targetBuyer}.
+
+It tackles this painful workflow:
+${winner.pain}
+
+If the validation signal is strong, I will build the complete ${winner.title} package and share the demo next.`,
+    dmReply: `Appreciate the interest. The planned package is ${winner.title}: full Next.js/Supabase source, AI prompts, schema, docs, seed data, and license options.
+
+The quick demo is: ${demoHook}
+
+Would you want this for your own team, for a client, or as an agency resale/customization base?`,
+    followUpDm: `Quick follow-up: I am deciding whether this clears the build threshold.
+
+If ${winner.title} included the app, schema, prompts, docs, and setup guide, what would you need to see before paying for the source code?`,
+    paymentLinkMessage: `I am opening a small validation batch before building the full package.
+
+If you want first access to ${winner.title}, I can send a payment/reservation link for the source-code package. If the build does not move forward, I will refund it or apply it to the next validated package.`,
+    screenshotChecklist: [
+      "Original LinkedIn validation post with timestamp and visible comments",
+      "Comments asking for code, price, demo, access, or client use",
+      "DMs that mention a real use case, budget, or implementation timeline",
+      "Any reply comparing this to a current paid tool, freelancer, template, or internal build",
+      "Payment link clicks, paid reservations, or explicit price acceptance",
+      "Objections about scope, license, setup, integrations, or missing proof",
+    ],
+    demoScript30s: `0-5s: Name the pain: ${winner.pain}
+5-15s: Show the messy input becoming the useful output.
+15-23s: Reveal the source-code package: app, schema, prompts, docs, and seed data.
+23-30s: Ask for the buyer signal: comment "code" or DM for price/demo.`,
+    goNoGoRule: `Current Day-One Sale Probability: ${dayOneSaleProbability}/100. Build only if the validation post produces at least 5 relevant comments or 3 serious DMs within 48 hours, with at least 1 person asking about price, payment, source-code ownership, or client/agency reuse. If that does not happen, do not build yet; revise the niche, pain, or offer and test again.`,
+  };
 }
 
 function createLinkedInPost(winner: ScoredProductIdea, demoHook: string) {

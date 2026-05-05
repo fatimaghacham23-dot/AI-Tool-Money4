@@ -11,17 +11,20 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import type { PreSellPack } from "@/ai/types";
 
-type CopyKey = "blueprint" | "prompt" | "linkedin" | "dm";
+type CopyKey = "blueprint" | "prompt" | "linkedin" | "dm" | "presell";
 
 export function ReportCopyActions({
   reportMarkdown,
   linkedinPost,
   dmScript,
+  preSellPack,
 }: {
   reportMarkdown: string;
   linkedinPost: string;
   dmScript: string;
+  preSellPack?: PreSellPack | null;
 }) {
   const [copied, setCopied] = useState<CopyKey | null>(null);
   const slices = useMemo(() => {
@@ -33,8 +36,9 @@ export function ReportCopyActions({
       prompt,
       linkedin: linkedinPost,
       dm: dmScript,
+      presell: formatPreSellPack(preSellPack),
     };
-  }, [dmScript, linkedinPost, reportMarkdown]);
+  }, [dmScript, linkedinPost, preSellPack, reportMarkdown]);
 
   async function copy(key: CopyKey) {
     await navigator.clipboard.writeText(slices[key]);
@@ -70,6 +74,11 @@ export function ReportCopyActions({
           label="DM Script"
           copied={copied === "dm"}
           onClick={() => copy("dm")}
+        />
+        <CopyButton
+          label="Pre-Sell Pack"
+          copied={copied === "presell"}
+          onClick={() => copy("presell")}
         />
       </CardContent>
     </Card>
@@ -133,4 +142,38 @@ function extractSubsection(markdown: string, title: string) {
   const match = markdown.match(pattern);
 
   return match?.[2]?.trim() ?? "";
+}
+
+function formatPreSellPack(pack?: PreSellPack | null) {
+  if (!pack) {
+    return "Pre-Sell Pack is not available in this report.";
+  }
+
+  return [
+    "# Pre-Sell Pack",
+    "",
+    "## LinkedIn validation post",
+    pack.validationPost,
+    "",
+    "## Teaser post",
+    pack.teaserPost,
+    "",
+    "## DM reply",
+    pack.dmReply,
+    "",
+    "## Follow-up DM",
+    pack.followUpDm,
+    "",
+    "## Payment link message",
+    pack.paymentLinkMessage,
+    "",
+    "## Screenshot checklist",
+    ...pack.screenshotChecklist.map((item) => `- ${item}`),
+    "",
+    "## 30-second demo script",
+    pack.demoScript30s,
+    "",
+    "## Go/no-go threshold",
+    pack.goNoGoRule,
+  ].join("\n");
 }

@@ -32,6 +32,16 @@ export const SCORE_RANGE_OPTIONS: Array<{
   { value: "under-70", label: "Under 70" },
 ];
 
+export const FINAL_DECISION_OPTIONS: Array<{
+  value: NonNullable<FactoryFilters["finalDecision"]>;
+  label: string;
+}> = [
+  { value: "all", label: "All decisions" },
+  { value: "build_now", label: "Build now" },
+  { value: "validate_first", label: "Validate first" },
+  { value: "reject_all", label: "Reject all" },
+];
+
 export function createFactoryOverview(
   ideas: FactoryProductIdea[],
 ): FactoryOverview {
@@ -80,6 +90,14 @@ export function filterFactoryProductIdeas(
     }
 
     if (
+      filters.finalDecision &&
+      filters.finalDecision !== "all" &&
+      idea.finalReport?.final_decision !== filters.finalDecision
+    ) {
+      return false;
+    }
+
+    if (
       filters.buyerType &&
       filters.buyerType !== "all" &&
       normalizeBuyer(idea.target_buyer ?? idea.councilRun.target_buyer) !== filters.buyerType
@@ -95,7 +113,7 @@ export function filterFactoryProductIdeas(
       return false;
     }
 
-    if (filters.highLinkedInVirality && (idea.score?.linkedin_virality ?? 0) < 8) {
+    if (filters.highLinkedInVirality && (idea.score?.linkedin_demo_strength ?? 0) < 8) {
       return false;
     }
 
@@ -103,7 +121,7 @@ export function filterFactoryProductIdeas(
       return false;
     }
 
-    if (filters.highPricePotential && (idea.score?.price_potential ?? 0) < 8) {
+    if (filters.highPricePotential && (idea.score?.price_believability ?? 0) < 8) {
       return false;
     }
 
@@ -127,6 +145,21 @@ export function normalizeBuyer(value?: string | null) {
 
 export function factoryStatusLabel(status: FactoryStatus) {
   return FACTORY_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
+}
+
+export function finalDecisionLabel(
+  decision: NonNullable<FactoryProductIdea["finalReport"]>["final_decision"] | null | undefined,
+) {
+  switch (decision) {
+    case "build_now":
+      return "Build now";
+    case "validate_first":
+      return "Validate first";
+    case "reject_all":
+      return "Reject all";
+    default:
+      return "Pending";
+  }
 }
 
 export function evidenceStatusLabel(

@@ -9,6 +9,8 @@ import type {
   ProductIdeaDraft,
   ScoredProductIdea,
 } from "@/ai/types";
+import { DAY_ONE_BUILD_THRESHOLD } from "@/ai/scoring";
+import { ensureTextArray } from "@/lib/db/normalize-db-values";
 import type { Database, Json, ProductIdeaStatus } from "@/types/database";
 
 function factoryStatusFromIdeaStatus(status: ProductIdeaStatus) {
@@ -26,6 +28,33 @@ export class SupabaseDebatePersistence implements DebatePersistence {
       .from("council_runs")
       .update({ status })
       .eq("id", this.councilRunId);
+  }
+
+  async updateRunProgress(progress: {
+    currentRound?: string | null;
+    currentAgent?: string | null;
+    currentStep?: string | null;
+    currentProvider?: string | null;
+    currentModel?: string | null;
+    progressPercent?: number | null;
+  }) {
+    const { error } = await this.client
+      .from("council_runs")
+      .update({
+        current_round: progress.currentRound ?? null,
+        current_agent: progress.currentAgent ?? null,
+        current_step: progress.currentStep ?? null,
+        current_provider: progress.currentProvider ?? null,
+        current_model: progress.currentModel ?? null,
+        progress_percent: progress.progressPercent ?? null,
+      })
+      .eq("id", this.councilRunId);
+
+    if (error) {
+      // Older local databases may not have the live-progress columns yet.
+      // The schema file includes them; keep the run alive until the user applies it.
+      console.warn("Could not update council live progress.", error.message);
+    }
   }
 
   async createRound(round: DebateRoundDraft) {
@@ -48,15 +77,28 @@ export class SupabaseDebatePersistence implements DebatePersistence {
   }
 
   async addMessage(message: DebateMessageDraft) {
-    const { error } = await this.client.from("agent_messages").insert({
+    const payload = {
       council_run_id: this.councilRunId,
       debate_round_id: message.roundId,
       agent_id: message.agent.id ?? null,
+      model_provider: message.provider ?? message.agent.modelProvider,
+      model_name: message.model ?? message.agent.modelName,
       content: message.content,
-    });
+    };
+
+    const { error } = await this.client.from("agent_messages").insert(payload);
 
     if (error) {
-      throw error;
+      const { error: fallbackError } = await this.client.from("agent_messages").insert({
+        council_run_id: payload.council_run_id,
+        debate_round_id: payload.debate_round_id,
+        agent_id: payload.agent_id,
+        content: payload.content,
+      });
+
+      if (fallbackError) {
+        throw fallbackError;
+      }
     }
   }
 
@@ -71,10 +113,10 @@ export class SupabaseDebatePersistence implements DebatePersistence {
           target_buyer: idea.targetBuyer,
           pain: idea.pain,
           why_buy_source_code: idea.whyBuySourceCode,
-          mvp_features: idea.mvpFeatures,
-          full_features: idea.fullFeatures,
+          mvp_features: ensureTextArray(idea.mvpFeatures),
+          full_features: ensureTextArray(idea.fullFeatures),
           pricing_idea: idea.pricingIdea,
-          risks: idea.risks,
+          risks: ensureTextArray(idea.risks),
           status: idea.status ?? "generated",
           factory_status: idea.status
             ? factoryStatusFromIdeaStatus(idea.status)
@@ -171,16 +213,16 @@ export class SupabaseDebatePersistence implements DebatePersistence {
       .filter((idea) => idea.id)
       .map((idea) => ({
         product_idea_id: idea.id!,
-        buyer_demand: idea.score.buyer_demand,
-        linkedin_virality: idea.score.linkedin_virality,
-        source_code_resale_value: idea.score.source_code_resale_value,
+        buyer_urgency: idea.score.buyer_urgency,
+        existing_purchase_behavior: idea.score.existing_purchase_behavior,
+        linkedin_demo_strength: idea.score.linkedin_demo_strength,
+        comment_dm_likelihood: idea.score.comment_dm_likelihood,
+        actual_tool_gap: idea.score.actual_tool_gap,
+        source_code_gap: idea.score.source_code_gap,
+        manual_workaround_pain: idea.score.manual_workaround_pain,
+        hidden_workflow_specificity: idea.score.hidden_workflow_specificity,
+        price_believability: idea.score.price_believability,
         build_speed: idea.score.build_speed,
-        demo_quality: idea.score.demo_quality,
-        ai_value: idea.score.ai_value,
-        customization_potential: idea.score.customization_potential,
-        competition_weakness: idea.score.competition_weakness,
-        price_potential: idea.score.price_potential,
-        ahmad_founder_fit: idea.score.ahmad_founder_fit,
         total_score: idea.score.total_score,
         score_explanations: (idea.scoreExplanations ?? {}) as Json,
       }));
@@ -198,18 +240,27 @@ export class SupabaseDebatePersistence implements DebatePersistence {
 
   async saveFinalReport(report: FinalReportDraft, winner: ScoredProductIdea) {
     if (!winner.id) {
-      throw new Error("Cannot save final report without a persisted winner id.");
+      throw new Error("Cannot save final report without a persisted product idea id.");
     }
+
+    const finalDecision = report.finalDecision ?? "validate_first";
+    const canBuildNow =
+      finalDecision === "build_now" &&
+      (report.dayOneSaleProbability ?? winner.score.total_score) >= DAY_ONE_BUILD_THRESHOLD;
+    const persistedWinnerId = canBuildNow ? winner.id : null;
 
     const { error: reportError } = await this.client.from("final_reports").insert({
       council_run_id: this.councilRunId,
-      winner_product_id: winner.id,
+      winner_product_id: persistedWinnerId,
+      final_decision: canBuildNow ? "build_now" : finalDecision,
+      day_one_sale_probability: report.dayOneSaleProbability ?? winner.score.total_score,
       report_markdown: report.reportMarkdown,
       linkedin_post: report.linkedinPost,
       dm_script: report.dmScript,
       demo_video_script: report.demoVideoScript,
       build_plan: report.buildPlan as Json,
-      packaging_checklist: report.packagingChecklist,
+      packaging_checklist: ensureTextArray(report.packagingChecklist),
+      pre_sell_pack: (report.preSellPack ?? {}) as Json,
     });
 
     if (reportError) {
@@ -219,7 +270,7 @@ export class SupabaseDebatePersistence implements DebatePersistence {
     const { error: runError } = await this.client
       .from("council_runs")
       .update({
-        winner_product_id: winner.id,
+        winner_product_id: persistedWinnerId,
         status: "completed",
       })
       .eq("id", this.councilRunId);
@@ -228,9 +279,21 @@ export class SupabaseDebatePersistence implements DebatePersistence {
       throw runError;
     }
 
+    const nextFactoryStatus =
+      canBuildNow
+        ? "winner"
+        : finalDecision === "reject_all"
+          ? "rejected"
+          : "validating";
     const { error: winnerError } = await this.client
       .from("product_ideas")
-      .update({ factory_status: "winner" })
+      .update({
+        factory_status: nextFactoryStatus,
+        rejected_reason:
+          nextFactoryStatus === "rejected"
+            ? "Rejected by Day-One Sale Probability judge."
+            : null,
+      })
       .eq("id", winner.id);
 
     if (winnerError) {
@@ -245,7 +308,26 @@ export async function resetCouncilRunArtifacts(
 ) {
   await client
     .from("council_runs")
-    .update({ winner_product_id: null, status: "draft" })
+    .update({
+      winner_product_id: null,
+      status: "running",
+      error_message: null,
+      failed_step: null,
+      failed_round: null,
+      failed_agent: null,
+      failed_provider: null,
+      failed_model: null,
+      current_round: null,
+      current_agent: null,
+      current_step: "Preparing council debate",
+      current_provider: null,
+      current_model: null,
+      progress_percent: 0,
+      started_at: null,
+      completed_at: null,
+      failed_at: null,
+      debug_trace: null,
+    })
     .eq("id", councilRunId);
 
   await client.from("final_reports").delete().eq("council_run_id", councilRunId);

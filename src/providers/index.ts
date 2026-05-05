@@ -1,4 +1,4 @@
-import { hasGitHubModelsEnv, hasOpenAIEnv } from "@/lib/env";
+import { getGitHubModelsToken, hasOpenAIEnv } from "@/lib/env";
 import { GitHubModelsProvider } from "@/providers/github-models";
 import { MockProvider } from "@/providers/mock";
 import { OpenAIProvider } from "@/providers/openai";
@@ -7,8 +7,10 @@ import type { AIProvider } from "@/providers/types";
 let hasWarnedMissingGitHubToken = false;
 
 export function getAIProvider(): AIProvider {
-  if (hasGitHubModelsEnv()) {
-    return new GitHubModelsProvider(process.env.GITHUB_MODELS_TOKEN!);
+  const githubModelsToken = getGitHubModelsToken();
+
+  if (githubModelsToken) {
+    return new GitHubModelsProvider(githubModelsToken);
   }
 
   if (!hasWarnedMissingGitHubToken) {
