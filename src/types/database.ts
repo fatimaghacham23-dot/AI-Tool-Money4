@@ -122,6 +122,13 @@ export type Database = {
         Update: Partial<SalesAssetInsert>;
         Relationships: [];
       };
+      package_plans: {
+        Row: PackagePlanRow;
+        Insert: PackagePlanInsert;
+        Update: Partial<PackagePlanInsert>;
+        Relationships: [];
+      };
+
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;
@@ -428,6 +435,34 @@ export type SalesAssetInsert = {
   asset_type: string;
   title: string;
   content: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type PackagePlanRow = {
+  id: string;
+  product_idea_id: string;
+  package_markdown: string;
+  readme_markdown: string;
+  quickstart_markdown: string;
+  license_markdown: string;
+  sales_page_copy: string;
+  demo_video_script: string;
+  onboarding_email: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PackagePlanInsert = {
+  id?: string;
+  product_idea_id: string;
+  package_markdown: string;
+  readme_markdown: string;
+  quickstart_markdown: string;
+  license_markdown: string;
+  sales_page_copy: string;
+  demo_video_script: string;
+  onboarding_email: string;
   created_at?: string;
   updated_at?: string;
 };

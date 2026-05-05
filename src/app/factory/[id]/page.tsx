@@ -78,6 +78,11 @@ export default async function ProductFactoryDetailPage({
               Execution plan
             </Link>
           </Button>
+          <Button asChild variant="outline">
+            <Link href={`/factory/${idea.id}/package`}>
+              Package Plan
+            </Link>
+          </Button>
         </div>
       </div>
 

@@ -805,3 +805,19 @@ on conflict (name) do update set
   model_provider = excluded.model_provider,
   model_name = excluded.model_name,
   enabled = excluded.enabled;
+
+
+create table if not exists package_plans (
+  id uuid primary key default gen_random_uuid(),
+  product_idea_id uuid not null references product_ideas(id) on delete cascade,
+  package_markdown text not null default '',
+  readme_markdown text not null default '',
+  quickstart_markdown text not null default '',
+  license_markdown text not null default '',
+  sales_page_copy text not null default '',
+  demo_video_script text not null default '',
+  onboarding_email text not null default '',
+  created_at timestamptz not null default timezone('utc', now()),
+  updated_at timestamptz not null default timezone('utc', now()),
+  unique(product_idea_id)
+);

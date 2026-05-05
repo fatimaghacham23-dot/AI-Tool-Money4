@@ -432,3 +432,24 @@ function demoRunToInput() {
     marketEvidenceNotes: demoRun.market_evidence_notes,
   };
 }
+
+
+export function getMockPackagePlan(productIdeaId: string) {
+  if (productIdeaId !== "idea-1") {
+    return null;
+  }
+
+  return {
+    id: "package-idea-1",
+    product_idea_id: "idea-1",
+    package_markdown: "# Demo Package Plan\nThis is a deterministic package plan for idea-1.",
+    readme_markdown: "# README Outline\n- What this product is\n- Who it is for\n- Features",
+    quickstart_markdown: "# Quickstart\n1. Install dependencies\n2. Configure Supabase",
+    license_markdown: "# License\nLite / Pro / Agency",
+    sales_page_copy: "# Sales Copy\nHeadline + features + pricing.",
+    demo_video_script: "# Demo Script\n30s / 90s / LinkedIn",
+    onboarding_email: "# Onboarding\nPurchase + setup + follow-up",
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+}
