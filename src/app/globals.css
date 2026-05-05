@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 28 20% 96%;
+    --foreground: 24 10% 8%;
+    --card: 0 0% 100%;
+    --card-foreground: 24 10% 8%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 24 10% 8%;
+    --primary: 170 70% 27%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 35 92% 53%;
+    --secondary-foreground: 24 10% 8%;
+    --muted: 30 12% 90%;
+    --muted-foreground: 25 8% 38%;
+    --accent: 345 72% 46%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 28 12% 82%;
+    --input: 28 12% 82%;
+    --ring: 170 70% 27%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 24 11% 8%;
+    --foreground: 30 16% 92%;
+    --card: 24 10% 11%;
+    --card-foreground: 30 16% 92%;
+    --popover: 24 10% 11%;
+    --popover-foreground: 30 16% 92%;
+    --primary: 170 65% 42%;
+    --primary-foreground: 24 11% 8%;
+    --secondary: 39 90% 56%;
+    --secondary-foreground: 24 11% 8%;
+    --muted: 24 8% 18%;
+    --muted-foreground: 30 9% 66%;
+    --accent: 345 68% 58%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 70% 55%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 24 7% 24%;
+    --input: 24 7% 24%;
+    --ring: 170 65% 42%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground antialiased;
+    background:
+      linear-gradient(135deg, rgb(28 24 20 / 0.96), rgb(15 16 15 / 0.98) 46%, rgb(20 16 18 / 0.98)),
+      radial-gradient(circle at top left, rgb(20 184 166 / 0.12), transparent 36%),
+      radial-gradient(circle at bottom right, rgb(245 158 11 / 0.08), transparent 34%);
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .council-grid {
+    background-image:
+      linear-gradient(rgb(255 255 255 / 0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.04) 1px, transparent 1px);
+    background-size: 42px 42px;
+  }
+}
