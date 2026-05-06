@@ -74,6 +74,7 @@ export type ProductIdeaDraft = {
   beforeAfterDemo?: string;
   initialSearchQueries?: string[];
   buildComplexity?: "low" | "medium" | "high" | string;
+  fallbackGenerated?: boolean;
   nicheDownAttempts?: string[];
   genericRiskReason?: string;
   mvpFeatures: string[];
@@ -222,12 +223,17 @@ export interface DebatePersistence {
   createRound(round: DebateRoundDraft): Promise<{ id: string }>;
   addMessage(message: DebateMessageDraft): Promise<void>;
   saveIdeas(ideas: ProductIdeaDraft[]): Promise<ProductIdeaDraft[]>;
-  saveMarketEvidence?(evidence: MarketEvidenceDraft[]): Promise<MarketEvidenceDraft[]>;
+  saveMarketEvidence?(
+    evidence: MarketEvidenceDraft[],
+  ): Promise<MarketEvidenceDraft[]>;
   updateIdeaStatuses(
     updates: Array<{ id?: string; title: string; status: ProductIdeaStatus }>,
   ): Promise<void>;
   saveScores(scoredIdeas: ScoredProductIdea[]): Promise<void>;
-  saveFinalReport(report: FinalReportDraft, winner: ScoredProductIdea): Promise<void>;
+  saveFinalReport(
+    report: FinalReportDraft,
+    winner: ScoredProductIdea,
+  ): Promise<void>;
 }
 
 export type AgentRowLike = Pick<

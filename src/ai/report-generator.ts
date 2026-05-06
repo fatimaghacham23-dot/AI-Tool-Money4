@@ -57,7 +57,10 @@ export type ReportContext = {
 };
 
 type ReportDebugOptions = {
-  onBetterDirectionGenerated?: (direction: { title: string; queries: string[] }) => void;
+  onBetterDirectionGenerated?: (direction: {
+    title: string;
+    queries: string[];
+  }) => void;
 };
 
 export function buildReportPrompt(
@@ -141,7 +144,13 @@ export function createDeterministicReport(
     if (context.killSwitchRejectAll) {
       return createKillSwitchRejectAllReport(run, context);
     }
-    return createRejectAllReport(run, winner, context, dayOneSaleProbability, options);
+    return createRejectAllReport(
+      run,
+      winner,
+      context,
+      dayOneSaleProbability,
+      options,
+    );
   }
 
   const decisionLabel = finalDecisionLabel(finalDecision);
@@ -151,14 +160,17 @@ export function createDeterministicReport(
       : "Validate first / Do not build yet.";
   const offer = `A complete ${winner.title} source-code package for ${winner.targetBuyer.toLowerCase()} that saves weeks of product setup.`;
   const demoHook = createDemoHook(winner);
-  const preSellPack = createPreSellPack(winner, demoHook, dayOneSaleProbability);
+  const preSellPack = createPreSellPack(
+    winner,
+    demoHook,
+    dayOneSaleProbability,
+  );
   const scoreRows = SCORING_RUBRIC.map((item) => {
     const value = winner.score[item.key];
     const explanation =
       winner.scoreExplanations?.[item.key] ??
-      context.scoreHistory?.find((score) => score.title === winner.title)?.explanations[
-        item.key
-      ] ??
+      context.scoreHistory?.find((score) => score.title === winner.title)
+        ?.explanations[item.key] ??
       item.description;
     return `| ${item.label} | ${value}/10 | ${explanation} |`;
   }).join("\n");
@@ -376,7 +388,9 @@ It packages the workflow end-to-end with a demoable before/after, plus full sour
 The idea should be treated as non-copycat only where the exact workflow is not found in searched market evidence, similar SaaS results are indirect or incomplete, and source-code kits do not already package the same workflow. If market evidence is too close, keep the decision as validate_first or reject_all.
 
 # Better Niche Down
-${createNicheDowns(winner).map((item) => `- ${item}`).join("\n")}
+${createNicheDowns(winner)
+  .map((item) => `- ${item}`)
+  .join("\n")}
 
 ## Why buyer would care now
 Because it reduces delivery risk/time and replaces manual workarounds with a repeatable workflow.
@@ -389,7 +403,9 @@ ${finalDecision === "build_now" ? createLinkedInPost(winner, demoHook) : preSell
 ${finalDecision === "build_now" ? createDMScript(winner) : preSellPack.dmReply}
 
 ## Buyer question list
-${createBuyerQuestions(winner).map((item) => `- ${item}`).join("\n")}
+${createBuyerQuestions(winner)
+  .map((item) => `- ${item}`)
+  .join("\n")}
 
 ## Go/no-go rule
 ${preSellPack.goNoGoRule}
@@ -425,7 +441,10 @@ ${codexPrompt}
       finalDecision === "build_now"
         ? createLinkedInPost(winner, demoHook)
         : preSellPack.validationPost,
-    dmScript: finalDecision === "build_now" ? createDMScript(winner) : preSellPack.dmReply,
+    dmScript:
+      finalDecision === "build_now"
+        ? createDMScript(winner)
+        : preSellPack.dmReply,
     demoVideoScript:
       finalDecision === "build_now"
         ? createDemoScript(winner, demoHook)
@@ -450,46 +469,73 @@ ${codexPrompt}
 
 function analyzeRejectAllContext(context: ReportContext) {
   const rejected = context.rejectedIdeas ?? [];
-  const marketItems = (context.marketEvidence ?? []).filter((item) => item.sourceType === "market_search");
+  const marketItems = (context.marketEvidence ?? []).filter(
+    (item) => item.sourceType === "market_search",
+  );
 
   const tooGeneric = rejected
-    .filter((idea) => /generic|too generic|broad|vague/i.test(`${idea.reason} ${(idea.risks ?? []).join(" ")}`))
+    .filter((idea) =>
+      /generic|too generic|broad|vague/i.test(
+        `${idea.reason} ${(idea.risks ?? []).join(" ")}`,
+      ),
+    )
     .map((idea) => `${idea.title}: ${idea.reason}`);
 
   const tooCrowded = rejected
-    .filter((idea) => /tool exists|crowded|competitor|template|kit|market/i.test(`${idea.reason} ${(idea.risks ?? []).join(" ")}`))
+    .filter((idea) =>
+      /tool exists|crowded|competitor|template|kit|market/i.test(
+        `${idea.reason} ${(idea.risks ?? []).join(" ")}`,
+      ),
+    )
     .map((idea) => `${idea.title}: ${idea.reason}`);
 
   const killingEvidence = marketItems
     .flatMap((item) => {
-      const title = item.title.replace(/^Market Search Reality Check:\s*/i, "").trim();
+      const title = item.title
+        .replace(/^Market Search Reality Check:\s*/i, "")
+        .trim();
       const lines = (item.content ?? "").split("\n").map((line) => line.trim());
-      const tools = lines.find((line) => line.startsWith("similar_tools_found:"))?.replace(/^similar_tools_found:\s*/i, "");
-      const kits = lines.find((line) => line.startsWith("source_code_kits_found:"))?.replace(/^source_code_kits_found:\s*/i, "");
-      const exact = lines.find((line) => line.startsWith("exact_tool_exists_in_searched_results:"))?.replace(/^exact_tool_exists_in_searched_results:\s*/i, "");
-      const risk = lines.find((line) => line.startsWith("common_category_risk:"))?.replace(/^common_category_risk:\s*/i, "");
+      const tools = lines
+        .find((line) => line.startsWith("similar_tools_found:"))
+        ?.replace(/^similar_tools_found:\s*/i, "");
+      const kits = lines
+        .find((line) => line.startsWith("source_code_kits_found:"))
+        ?.replace(/^source_code_kits_found:\s*/i, "");
+      const exact = lines
+        .find((line) =>
+          line.startsWith("exact_tool_exists_in_searched_results:"),
+        )
+        ?.replace(/^exact_tool_exists_in_searched_results:\s*/i, "");
+      const risk = lines
+        .find((line) => line.startsWith("common_category_risk:"))
+        ?.replace(/^common_category_risk:\s*/i, "");
 
       const evidenceLines: string[] = [];
       if (exact) evidenceLines.push(`exact=${exact}`);
       if (risk) evidenceLines.push(`category_risk=${risk}`);
-      if (tools && tools !== "none in searched results") evidenceLines.push(`tools=${tools}`);
-      if (kits && kits !== "none in searched results") evidenceLines.push(`kits=${kits}`);
+      if (tools && tools !== "none in searched results")
+        evidenceLines.push(`tools=${tools}`);
+      if (kits && kits !== "none in searched results")
+        evidenceLines.push(`kits=${kits}`);
       if (!evidenceLines.length) return [];
 
       return [`${title}: ${evidenceLines.join("; ")}`];
     })
     .slice(0, 12);
 
-  const failureStage = context.finalDecisionReason?.includes("generic/structure kill switch")
+  const failureStage = context.finalDecisionReason?.includes(
+    "generic/structure kill switch",
+  )
     ? "All generated ideas were removed by the generic/structure kill switch before market search."
     : context.finalDecisionReason?.includes("market")
       ? "Failure happened at the market gate after searched evidence."
       : "Failure happened at the hard-gate review.";
 
-  const generationFailedSummary =
-    context.finalDecisionReason?.includes("generic/structure kill switch")
-      ? "All generated ideas were removed by the generic/structure kill switch before market search."
-      : tooGeneric.length && tooCrowded.length
+  const generationFailedSummary = context.finalDecisionReason?.includes(
+    "generic/structure kill switch",
+  )
+    ? "All generated ideas were removed by the generic/structure kill switch before market search."
+    : tooGeneric.length && tooCrowded.length
       ? "Idea generation produced a mix of generic titles/structures AND market-crowded ideas, so the run had nothing weirdly-specific that also cleared searched evidence."
       : tooGeneric.length
         ? "Idea generation produced too many generic titles/structures that did not clearly name a hidden manual workflow (buyer + messy input + workaround + artifact + painful moment)."
@@ -515,7 +561,10 @@ function createBetterHiddenWorkflowDirections(
     ...(context.shortlistedIdeas ?? []),
   ]);
   const rejectedReasons = new Map(
-    (context.rejectedIdeas ?? []).map((idea) => [normalizeKey(idea.title), idea.reason]),
+    (context.rejectedIdeas ?? []).map((idea) => [
+      normalizeKey(idea.title),
+      idea.reason,
+    ]),
   );
   const failedTitles = new Set([
     ...(context.rejectedIdeas ?? []).map((idea) => normalizeKey(idea.title)),
@@ -559,13 +608,22 @@ function createBetterWorkflowDirection(
   onGenerated?: ReportDebugOptions["onBetterDirectionGenerated"],
 ) {
   const buyer = exactBuyerNiche(seed.targetBuyer, index);
-  const messyInput = concreteDirectionValue(seed.messyInput, directionMessyInputFallback(index));
+  const messyInput = concreteDirectionValue(
+    seed.messyInput,
+    directionMessyInputFallback(index),
+  );
   const manualWorkaround = concreteDirectionValue(
     seed.manualWorkaroundToday,
     directionManualWorkaroundFallback(messyInput, index),
   );
-  const outputArtifact = concreteDirectionValue(seed.outputArtifact, directionArtifactFallback(index));
-  const painfulMoment = concreteDirectionEvent(seed.painfulMoment || seed.pain, directionPainfulFallback(index));
+  const outputArtifact = concreteDirectionValue(
+    seed.outputArtifact,
+    directionArtifactFallback(index),
+  );
+  const painfulMoment = concreteDirectionEvent(
+    seed.painfulMoment || seed.pain,
+    directionPainfulFallback(index),
+  );
   let title = normalizeProductTitle(
     `${singularInputLabel(messyInput)} ${outputArtifact} for ${buyer}`,
     buyer,
@@ -617,13 +675,19 @@ function createFallbackDirectionSeeds(count: number): ProductIdeaDraft[] {
     description: "Fresh hidden workflow direction generated after reject_all.",
     targetBuyer: directionBuyerFallback(index),
     pain: directionPainfulFallback(index),
-    whyBuySourceCode: "A narrow source-code package can be customized for a repeated client delivery workflow.",
-    manualWorkaroundToday: directionManualWorkaroundFallback(directionMessyInputFallback(index), index),
+    whyBuySourceCode:
+      "A narrow source-code package can be customized for a repeated client delivery workflow.",
+    manualWorkaroundToday: directionManualWorkaroundFallback(
+      directionMessyInputFallback(index),
+      index,
+    ),
     messyInput: directionMessyInputFallback(index),
     outputArtifact: directionArtifactFallback(index),
     painfulMoment: directionPainfulFallback(index),
-    broadSaasNotEnoughReason: "Broad tools store the input but do not produce this exact dispute-proof artifact.",
-    beforeAfterDemo: "Paste the messy input, show the contradiction, export the buyer-ready artifact.",
+    broadSaasNotEnoughReason:
+      "Broad tools store the input but do not produce this exact dispute-proof artifact.",
+    beforeAfterDemo:
+      "Paste the messy input, show the contradiction, export the buyer-ready artifact.",
     mvpFeatures: [],
     fullFeatures: [],
     pricingIdea: "$149-$499 source-code license",
@@ -647,7 +711,9 @@ function concreteDirectionEvent(value: string | undefined, fallback: string) {
 }
 
 function hasRawPainFragment(value: string) {
-  return /\b(they keep|they want|buyer wants|the buyer wants|faster path|is repetitive|is awkward)\b/i.test(value);
+  return /\b(they keep|they want|buyer wants|the buyer wants|faster path|is repetitive|is awkward)\b/i.test(
+    value,
+  );
 }
 
 function exactBuyerNiche(value: string | undefined, index: number) {
@@ -726,12 +792,19 @@ function singularInputLabel(input: string) {
 }
 
 function normalizeKey(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-
-function renderMarketSearchRealityCheck(evidence: MarketEvidenceDraft[] | undefined) {
-  const marketItems = (evidence ?? []).filter((item) => item.sourceType === "market_search");
+function renderMarketSearchRealityCheck(
+  evidence: MarketEvidenceDraft[] | undefined,
+) {
+  const marketItems = (evidence ?? []).filter(
+    (item) => item.sourceType === "market_search",
+  );
   if (!marketItems.length) {
     return [
       "- Market search status: no searched market evidence attached.",
@@ -758,7 +831,6 @@ function createNicheDowns(winner: ScoredProductIdea) {
   ];
 }
 
-
 function createKillSwitchRejectAllReport(
   run: CouncilRunInput,
   context: ReportContext,
@@ -773,12 +845,18 @@ function createKillSwitchRejectAllReport(
         .join("\n")
     : "| No valid Round 1 objects created | Round 1 failed to produce valid hidden workflow objects. | all required workflow fields | Regenerate from observed manual workflows before naming products. |";
 
+  const round1FailureMessage = context.finalDecisionReason?.startsWith(
+    "Round 1 ",
+  )
+    ? context.finalDecisionReason
+    : "Round 1 failed to produce valid hidden workflow objects.";
+
   const reportMarkdown = `# Reject All
 
 Reject all. Generate better hidden-gap ideas or add stronger market evidence.
 
 ## Kill-Switch Explanation
-Round 1 failed to produce valid hidden workflow objects.
+${round1FailureMessage}
 
 Market search was not run. Round 2 and Round 3 were not run because fewer than 5 valid hidden-workflow objects survived Round 1 extraction and the one repair attempt.
 
@@ -823,13 +901,18 @@ No build blueprint should be generated for this run.
     finalDecision: "reject_all",
     dayOneSaleProbability: undefined,
     reportMarkdown,
-    linkedinPost: "No launch post. Market search was not run because Round 1 failed hidden-workflow validation.",
-    dmScript: "No sales DM. Repair Round 1 hidden-workflow fields before contacting buyers.",
-    demoVideoScript: "No demo video. No idea survived to a demo-worthy shortlist.",
+    linkedinPost:
+      "No launch post. Market search was not run because Round 1 failed hidden-workflow validation.",
+    dmScript:
+      "No sales DM. Repair Round 1 hidden-workflow fields before contacting buyers.",
+    demoVideoScript:
+      "No demo video. No idea survived to a demo-worthy shortlist.",
     buildPlan: [],
     packagingChecklist: [],
-    codexBuildBlueprint: "No build blueprint. Round 1 failed to produce valid hidden workflow objects.",
-    codexPrompt: "Repair Round 1 hidden-workflow idea generation before building.",
+    codexBuildBlueprint:
+      "No build blueprint. Round 1 failed to produce valid hidden workflow objects.",
+    codexPrompt:
+      "Repair Round 1 hidden-workflow idea generation before building.",
   };
 }
 
@@ -849,7 +932,10 @@ function createRejectAllReport(
     return `| ${idea.title} | ${idea.score.total_score}/100 | ${failed} |`;
   });
   const marketEvidence = context.marketEvidence ?? [];
-  const evidenceAnalysis = createMarketEvidenceAnalysis(highestScoredIdea, marketEvidence);
+  const evidenceAnalysis = createMarketEvidenceAnalysis(
+    highestScoredIdea,
+    marketEvidence,
+  );
   const nextPrompt = createBetterCouncilPrompt(run);
   const nextWorkflowSearch = [
     "A named back-office workflow that buyers currently solve with spreadsheets, docs, email, Slack, screenshots, or repeated manual handoffs.",
@@ -921,7 +1007,9 @@ Reject any idea that already exists as a common SaaS category, a common AI wrapp
 No copycat claim is allowed for this rejected run. If an idea looks close to existing tools or the searched evidence is weak, it remains reject_all.
 
 # Better Niche Down
-${createNicheDowns(highestScoredIdea).map((item) => `- ${item}`).join("\n")}
+${createNicheDowns(highestScoredIdea)
+  .map((item) => `- ${item}`)
+  .join("\n")}
 
 # Hidden Workflow Gap
 No shortlisted idea proved a sufficiently weird, specific, painful workflow. The next council should start from observed manual workarounds and buyer language before naming products.
@@ -983,7 +1071,9 @@ function createCodexBuildBlueprint({
   marketEvidence,
   evidenceAnalysis,
 }: BlueprintInput) {
-  const targetDays = (run.buildTimeLimit ?? "").includes("14") ? "14-day" : "7-day";
+  const targetDays = (run.buildTimeLimit ?? "").includes("14")
+    ? "14-day"
+    : "7-day";
   const excludedFeatures = [
     "Native mobile app",
     "Multi-tenant marketplace",
@@ -1153,11 +1243,17 @@ ${buildPlan.map((item) => `  - ${item.day}: ${item.focus} - ${item.deliverable}`
 - Strongest current evidence:
 ${evidenceAnalysis.strongestEvidence.map((item) => `  - ${item.title} (${item.strengthScore}/10): ${item.content}`).join("\n") || "  - No direct evidence yet."}
 - 5 LinkedIn posts Ahmad should search for:
-${createLinkedInSearches(winner).map((item) => `  - ${item}`).join("\n")}
+${createLinkedInSearches(winner)
+  .map((item) => `  - ${item}`)
+  .join("\n")}
 - 5 buyer questions to ask:
-${createBuyerQuestions(winner).map((item) => `  - ${item}`).join("\n")}
+${createBuyerQuestions(winner)
+  .map((item) => `  - ${item}`)
+  .join("\n")}
 - 5 comments/DMs that would count as positive validation:
-${createPositiveValidationSignals(winner).map((item) => `  - ${item}`).join("\n")}
+${createPositiveValidationSignals(winner)
+  .map((item) => `  - ${item}`)
+  .join("\n")}
 - Minimum validation threshold before building:
   - Build now only when Day-One Sale Probability is ${DAY_ONE_BUILD_THRESHOLD}+.
   - If the score is below ${DAY_ONE_BUILD_THRESHOLD}, before spending more than 2 days building Ahmad should get at least 5 relevant comments or 3 serious DMs within 48 hours.
@@ -1230,28 +1326,32 @@ ${winner.fullFeatures.map((feature) => `  - ${feature}`).join("\n")}
 Pages:
 ${appPages
   .map(
-    (page) => `- ${page.route}: ${page.purpose}. Components: ${page.components.join(", ")}. Actions: ${page.actions.join(", ")}. Data: ${page.data.join(", ")}.`,
+    (page) =>
+      `- ${page.route}: ${page.purpose}. Components: ${page.components.join(", ")}. Actions: ${page.actions.join(", ")}. Data: ${page.data.join(", ")}.`,
   )
   .join("\n")}
 
 Database:
 ${databaseTables
   .map(
-    (table) => `- ${table.name}: columns ${table.columns.join(", ")}. Relationships: ${table.relationships.join(", ")}. Indexes: ${table.indexes.join(", ")}. RLS: ${table.rls}.`,
+    (table) =>
+      `- ${table.name}: columns ${table.columns.join(", ")}. Relationships: ${table.relationships.join(", ")}. Indexes: ${table.indexes.join(", ")}. RLS: ${table.rls}.`,
   )
   .join("\n")}
 
 APIs/server actions:
 ${apiRoutes
   .map(
-    (route) => `- ${route.method} ${route.route} (${route.name}): input ${route.input}; output ${route.output}; logic ${route.logic}; errors ${route.errorHandling}.`,
+    (route) =>
+      `- ${route.method} ${route.route} (${route.name}): input ${route.input}; output ${route.output}; logic ${route.logic}; errors ${route.errorHandling}.`,
   )
   .join("\n")}
 
 AI prompts/features:
 ${aiFeatures
   .map(
-    (feature) => `- ${feature.name}: ${feature.promptPurpose}. Inputs: ${feature.inputs.join(", ")}. Output: ${feature.outputFormat}. Fallback: ${feature.fallback}. Rules: ${feature.rules.join(", ")}.`,
+    (feature) =>
+      `- ${feature.name}: ${feature.promptPurpose}. Inputs: ${feature.inputs.join(", ")}. Output: ${feature.outputFormat}. Fallback: ${feature.fallback}. Rules: ${feature.rules.join(", ")}.`,
   )
   .join("\n")}
 
@@ -1270,9 +1370,13 @@ Validation before build:
 - Evidence status: ${marketEvidence.length ? "Evidence-backed" : "Assumption-heavy"}
 - Strongest evidence: ${evidenceAnalysis.strongestEvidence[0]?.title ?? "No direct evidence yet"}
 - Search LinkedIn for:
-${createLinkedInSearches(winner).map((item) => `  - ${item}`).join("\n")}
+${createLinkedInSearches(winner)
+  .map((item) => `  - ${item}`)
+  .join("\n")}
 - Ask buyers:
-${createBuyerQuestions(winner).map((item) => `  - ${item}`).join("\n")}
+${createBuyerQuestions(winner)
+  .map((item) => `  - ${item}`)
+  .join("\n")}
 - Positive validation threshold: get at least 5 interested comments or 3 serious DMs before spending more than 2 days building.
 
 Rejected ideas lost because:
@@ -1307,7 +1411,12 @@ function createAppPages(winner: ScoredProductIdea) {
     {
       route: "/dashboard",
       purpose: `Show saved ${winner.title} projects, recent AI outputs, and quick-start actions.`,
-      components: ["DashboardHeader", "StatsCards", "ProjectsTable", "RecentOutputs"],
+      components: [
+        "DashboardHeader",
+        "StatsCards",
+        "ProjectsTable",
+        "RecentOutputs",
+      ],
       actions: ["Create project", "Open project", "Search/filter records"],
       data: ["projects", "generated_outputs", "workspace stats"],
     },
@@ -1315,42 +1424,88 @@ function createAppPages(winner: ScoredProductIdea) {
       route: "/projects/new",
       purpose: "Collect the buyer inputs required to run the core workflow.",
       components: ["ProjectForm", "InputGuidancePanel", "TemplateSelector"],
-      actions: ["Enter project data", "Choose template", "Save draft", "Run AI"],
+      actions: [
+        "Enter project data",
+        "Choose template",
+        "Save draft",
+        "Run AI",
+      ],
       data: ["prompt_templates", "workspace settings", "source inputs"],
     },
     {
       route: "/projects/[id]",
-      purpose: "Manage one project and view its status, source inputs, and generated outputs.",
-      components: ["ProjectSummary", "SourceInputList", "OutputTimeline", "ActionBar"],
-      actions: ["Edit project", "Run AI workflow", "Export output", "Archive project"],
+      purpose:
+        "Manage one project and view its status, source inputs, and generated outputs.",
+      components: [
+        "ProjectSummary",
+        "SourceInputList",
+        "OutputTimeline",
+        "ActionBar",
+      ],
+      actions: [
+        "Edit project",
+        "Run AI workflow",
+        "Export output",
+        "Archive project",
+      ],
       data: ["project", "source_inputs", "generated_outputs", "audit_events"],
     },
     {
       route: "/projects/[id]/generate",
       purpose: "Run and review the primary AI-assisted workflow.",
-      components: ["GenerationWorkspace", "PromptPreview", "OutputEditor", "QualityChecklist"],
-      actions: ["Submit inputs", "Generate", "Regenerate", "Save edited output"],
+      components: [
+        "GenerationWorkspace",
+        "PromptPreview",
+        "OutputEditor",
+        "QualityChecklist",
+      ],
+      actions: [
+        "Submit inputs",
+        "Generate",
+        "Regenerate",
+        "Save edited output",
+      ],
       data: ["project", "prompt_templates", "AI response", "quality checks"],
     },
     {
       route: "/projects/[id]/export",
       purpose: "Preview and export the finished buyer/client-facing artifact.",
       components: ["ReportViewer", "ExportToolbar", "SharePreview"],
-      actions: ["Preview", "Copy markdown", "Export PDF-ready output", "Download JSON"],
+      actions: [
+        "Preview",
+        "Copy markdown",
+        "Export PDF-ready output",
+        "Download JSON",
+      ],
       data: ["project", "generated_outputs", "brand_settings"],
     },
     {
       route: "/settings",
-      purpose: "Customize prompts, branding, workspace defaults, and model settings.",
-      components: ["PromptSettingsForm", "BrandSettingsForm", "ModelSettingsForm"],
-      actions: ["Edit prompts", "Update brand", "Save settings", "Reset demo data"],
+      purpose:
+        "Customize prompts, branding, workspace defaults, and model settings.",
+      components: [
+        "PromptSettingsForm",
+        "BrandSettingsForm",
+        "ModelSettingsForm",
+      ],
+      actions: [
+        "Edit prompts",
+        "Update brand",
+        "Save settings",
+        "Reset demo data",
+      ],
       data: ["prompt_templates", "brand_settings", "workspace"],
     },
     {
       route: "/docs",
-      purpose: "Buyer-facing documentation for installing, customizing, and deploying the source code.",
+      purpose:
+        "Buyer-facing documentation for installing, customizing, and deploying the source code.",
       components: ["DocsNav", "MarkdownDocs", "SetupChecklist"],
-      actions: ["Read setup guide", "Copy commands", "Follow deployment checklist"],
+      actions: [
+        "Read setup guide",
+        "Copy commands",
+        "Follow deployment checklist",
+      ],
       data: ["static documentation", "environment variable list"],
     },
   ];
@@ -1389,7 +1544,9 @@ function createDatabaseTables(winner: ScoredProductIdea) {
         "updated_at timestamptz",
       ],
       relationships: ["workspace_id references workspaces(id)"],
-      indexes: ["projects_workspace_created_idx on workspace_id, created_at desc"],
+      indexes: [
+        "projects_workspace_created_idx on workspace_id, created_at desc",
+      ],
       rls: "Users can manage projects in workspaces they belong to.",
     },
     {
@@ -1419,7 +1576,9 @@ function createDatabaseTables(winner: ScoredProductIdea) {
         "created_at timestamptz",
       ],
       relationships: ["project_id references projects(id) on delete cascade"],
-      indexes: ["generated_outputs_project_created_idx on project_id, created_at desc"],
+      indexes: [
+        "generated_outputs_project_created_idx on project_id, created_at desc",
+      ],
       rls: "Output access follows project workspace membership.",
     },
     {
@@ -1468,7 +1627,9 @@ function createDatabaseTables(winner: ScoredProductIdea) {
         "project_id references projects(id)",
         "actor_id references users(id)",
       ],
-      indexes: ["audit_events_workspace_created_idx on workspace_id, created_at desc"],
+      indexes: [
+        "audit_events_workspace_created_idx on workspace_id, created_at desc",
+      ],
       rls: "Workspace members can read audit history.",
     },
   ].map((table) => ({
@@ -1488,8 +1649,10 @@ function createApiRoutes(winner: ScoredProductIdea) {
       method: "GET",
       input: "workspace id from session/context",
       output: "array of project summaries",
-      logic: "Fetch projects for the authenticated workspace, ordered by update date.",
-      errorHandling: "Return 401 when unauthenticated and 500 with safe message on query failure.",
+      logic:
+        "Fetch projects for the authenticated workspace, ordered by update date.",
+      errorHandling:
+        "Return 401 when unauthenticated and 500 with safe message on query failure.",
     },
     {
       name: "Create project",
@@ -1498,7 +1661,8 @@ function createApiRoutes(winner: ScoredProductIdea) {
       input: "title, metadata, initial source inputs",
       output: "created project",
       logic: `Create a ${winner.title} project, save initial inputs, and write audit event.`,
-      errorHandling: "Validate with Zod; return 400 for invalid fields and 403 for workspace mismatch.",
+      errorHandling:
+        "Validate with Zod; return 400 for invalid fields and 403 for workspace mismatch.",
     },
     {
       name: "Get project",
@@ -1506,7 +1670,8 @@ function createApiRoutes(winner: ScoredProductIdea) {
       method: "GET",
       input: "project id",
       output: "project, inputs, generated outputs, settings",
-      logic: "Load one project with related workflow data for the authenticated workspace.",
+      logic:
+        "Load one project with related workflow data for the authenticated workspace.",
       errorHandling: "Return 404 if missing or not accessible.",
     },
     {
@@ -1516,16 +1681,20 @@ function createApiRoutes(winner: ScoredProductIdea) {
       input: "title, status, metadata, edited output",
       output: "updated project",
       logic: "Update project metadata or edited output and refresh updated_at.",
-      errorHandling: "Return 400 for invalid payload and 409 for stale updates if versioning is added.",
+      errorHandling:
+        "Return 400 for invalid payload and 409 for stale updates if versioning is added.",
     },
     {
       name: "Run AI workflow",
       route: "/api/projects/[id]/generate",
       method: "POST",
-      input: "project id, selected prompt template, source input ids, generation options",
+      input:
+        "project id, selected prompt template, source input ids, generation options",
       output: "structured AI output and saved generated_outputs row",
-      logic: "Build prompt from project inputs, call provider adapter, validate JSON, save markdown and structured output.",
-      errorHandling: "Fallback to deterministic template if JSON parsing fails; return 502 for provider failure.",
+      logic:
+        "Build prompt from project inputs, call provider adapter, validate JSON, save markdown and structured output.",
+      errorHandling:
+        "Fallback to deterministic template if JSON parsing fails; return 502 for provider failure.",
     },
     {
       name: "Export output",
@@ -1533,8 +1702,10 @@ function createApiRoutes(winner: ScoredProductIdea) {
       method: "POST",
       input: "project id, output id, format",
       output: "markdown/PDF-ready/export JSON payload",
-      logic: "Render generated output with brand settings and return exportable content.",
-      errorHandling: "Return 404 for missing output and 400 for unsupported format.",
+      logic:
+        "Render generated output with brand settings and return exportable content.",
+      errorHandling:
+        "Return 404 for missing output and 400 for unsupported format.",
     },
     {
       name: "Update settings",
@@ -1543,7 +1714,8 @@ function createApiRoutes(winner: ScoredProductIdea) {
       input: "prompt templates, brand settings, model preferences",
       output: "updated settings",
       logic: "Persist workspace-level customization for prompts and branding.",
-      errorHandling: "Validate prompt length/schema; return 403 for non-admin workspace members.",
+      errorHandling:
+        "Validate prompt length/schema; return 403 for non-admin workspace members.",
     },
   ];
 }
@@ -1553,9 +1725,16 @@ function createAIFeatures(winner: ScoredProductIdea) {
     {
       name: "Core workflow generator",
       promptPurpose: `Turn buyer inputs into the primary ${winner.title} output.`,
-      inputs: ["project metadata", "source inputs", "selected prompt template", "brand settings"],
-      outputFormat: "JSON object with summary, recommendations, markdown output, confidence notes, and next actions",
-      fallback: "Generate a deterministic markdown output from saved inputs and show a retry option.",
+      inputs: [
+        "project metadata",
+        "source inputs",
+        "selected prompt template",
+        "brand settings",
+      ],
+      outputFormat:
+        "JSON object with summary, recommendations, markdown output, confidence notes, and next actions",
+      fallback:
+        "Generate a deterministic markdown output from saved inputs and show a retry option.",
       rules: [
         "Return valid JSON",
         "Avoid unsupported claims",
@@ -1565,9 +1744,11 @@ function createAIFeatures(winner: ScoredProductIdea) {
     },
     {
       name: "Quality reviewer",
-      promptPurpose: "Review the generated output for completeness, clarity, and demo readiness.",
+      promptPurpose:
+        "Review the generated output for completeness, clarity, and demo readiness.",
       inputs: ["generated output", "project goal", "target buyer"],
-      outputFormat: "JSON checklist with pass/fail items, issues, and suggested edits",
+      outputFormat:
+        "JSON checklist with pass/fail items, issues, and suggested edits",
       fallback: "Use a static quality checklist when the model fails.",
       rules: [
         "Flag missing required sections",
@@ -1578,7 +1759,8 @@ function createAIFeatures(winner: ScoredProductIdea) {
     },
     {
       name: "Rewrite assistant",
-      promptPurpose: "Rewrite selected output sections in a clearer or more buyer-specific tone.",
+      promptPurpose:
+        "Rewrite selected output sections in a clearer or more buyer-specific tone.",
       inputs: ["selected text", "tone", "target buyer", "context"],
       outputFormat: "JSON with rewrittenText and changeSummary",
       fallback: "Return the original text with a clear failure notice.",
@@ -1612,7 +1794,8 @@ function createUIComponents() {
 }
 
 function inferSourceBuyerType(winner: ScoredProductIdea) {
-  const text = `${winner.title} ${winner.targetBuyer} ${winner.description}`.toLowerCase();
+  const text =
+    `${winner.title} ${winner.targetBuyer} ${winner.description}`.toLowerCase();
 
   if (/agency|client|white-label|resell/.test(text)) {
     return "Agency owner or freelancer buying code to customize and resell to clients";
@@ -1641,7 +1824,8 @@ function createBuildPlan(run: CouncilRunInput) {
         {
           day: "Day 6-8",
           focus: "Buyer-facing polish",
-          deliverable: "Responsive UI, seed scenario, empty/loading/error states",
+          deliverable:
+            "Responsive UI, seed scenario, empty/loading/error states",
         },
         {
           day: "Day 9-11",
@@ -1702,7 +1886,10 @@ function createPricingTiers(winner: ScoredProductIdea) {
   };
 }
 
-function createRejectedLosses(winner: ScoredProductIdea, context: ReportContext) {
+function createRejectedLosses(
+  winner: ScoredProductIdea,
+  context: ReportContext,
+) {
   const explicitLosses = context.whyOthersLost ?? [];
   const rejected = (context.rejectedIdeas ?? []).slice(0, 8).map((idea) => ({
     title: idea.title,
@@ -1717,7 +1904,10 @@ function createRejectedLosses(winner: ScoredProductIdea, context: ReportContext)
         `Scored ${idea.score.total_score}/100, below ${winner.title} on Day-One Sale Probability.`,
     }));
 
-  return uniqueByTitle([...explicitLosses, ...scoredLosses, ...rejected]).slice(0, 12);
+  return uniqueByTitle([...explicitLosses, ...scoredLosses, ...rejected]).slice(
+    0,
+    12,
+  );
 }
 
 function createMarketEvidenceAnalysis(
@@ -1739,11 +1929,13 @@ function createMarketEvidenceAnalysis(
     ["willingness_to_pay", "pricing_signal"].includes(item.signalType),
   );
   const hasLinkedInEvidence = evidence.some(
-    (item) => item.sourceType === "linkedin" || item.signalType === "buyer_comment",
+    (item) =>
+      item.sourceType === "linkedin" || item.signalType === "buyer_comment",
   );
   const hasCompetitorEvidence = evidence.some(
     (item) =>
-      item.sourceType === "competitor" || item.signalType === "competitor_weakness",
+      item.sourceType === "competitor" ||
+      item.signalType === "competitor_weakness",
   );
 
   return {
