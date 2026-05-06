@@ -1,11 +1,148 @@
 export type HiddenWorkflowIdeaFields = {
   title: string;
   targetBuyer?: string;
+  exactBuyer?: string;
   manualWorkaroundToday?: string;
   messyInput?: string;
   outputArtifact?: string;
   painfulMoment?: string;
+  broadSaasNotEnoughReason?: string;
+  beforeAfterDemo?: string;
+  sourceCodeOwnershipAngle?: string;
+  whyBuySourceCode?: string;
+  initialSearchQueries?: string[];
+  buildComplexity?: string;
 };
+
+
+export const REQUIRED_WORKFLOW_FIELDS = [
+  "title",
+  "exactBuyer",
+  "manualWorkaroundToday",
+  "messyInput",
+  "outputArtifact",
+  "painfulMoment",
+  "broadSaasNotEnoughReason",
+  "beforeAfterDemo",
+  "sourceCodeOwnershipAngle",
+  "initialSearchQueries",
+  "buildComplexity",
+] as const;
+
+export type RequiredWorkflowField = (typeof REQUIRED_WORKFLOW_FIELDS)[number];
+
+export type WorkflowFieldIssue = {
+  field: RequiredWorkflowField;
+  reason: string;
+};
+
+const GENERIC_FILLER_REGEX =
+  /\b(helps?\s+(agencies|teams|businesses|buyers)\s+save\s+time|save\s+time|streamline\s+(workflows?|operations?|processes?)|automate\s+(workflows?|tasks?|processes?)|customize\s+and\s+resell\s+immediately|polished\s+client-facing\s+product)\b/i;
+
+const CONCRETE_INPUT_REGEX =
+  /\b(slack|email|gmail|outlook|screenshot|screenshots|loom|figma|doc|docs|google\s+doc|notion|spreadsheet|sheet|csv|pdf|contract|invoice|proposal|thread|transcript|meeting\s+notes|comments?|change\s+request|signoff|approval)\b/i;
+
+const CONCRETE_ARTIFACT_REGEX =
+  /\b(pack|proof|log|report|artifact|checklist|brief|summary|response|reply|template|audit|trail|evidence|ledger|packet|handoff|timeline|matrix|record|extract)\b/i;
+
+const CONCRETE_EVENT_REGEX =
+  /\b(client|customer|prospect|approv|signoff|change|request|scope|invoice|payment|overdue|dispute|revision|feedback|contract|clause|handoff|deadline|meeting|call|thread|message|screenshot)\b/i;
+
+const BUILD_COMPLEXITIES = new Set(["low", "medium", "high"]);
+
+export function validateRequiredWorkflowFields(idea: HiddenWorkflowIdeaFields) {
+  const issues: WorkflowFieldIssue[] = [];
+  const read = (field: RequiredWorkflowField) => workflowFieldValue(idea, field);
+
+  for (const field of REQUIRED_WORKFLOW_FIELDS) {
+    const value = read(field);
+    if (field === "initialSearchQueries") {
+      const queries = Array.isArray(idea.initialSearchQueries) ? idea.initialSearchQueries : [];
+      if (queries.length < 5) {
+        issues.push({ field, reason: "missing at least 5 concrete search queries" });
+      } else if (queries.some((query) => GENERIC_FILLER_REGEX.test(query) || !CONCRETE_EVENT_REGEX.test(query))) {
+        issues.push({ field, reason: "queries must name concrete workflow artifacts or events" });
+      }
+      continue;
+    }
+
+    if (field === "buildComplexity") {
+      if (!BUILD_COMPLEXITIES.has(value.toLowerCase())) {
+        issues.push({ field, reason: "missing low, medium, or high build complexity" });
+      }
+      continue;
+    }
+
+    if (!value) {
+      issues.push({ field, reason: "empty" });
+      continue;
+    }
+
+    if (GENERIC_FILLER_REGEX.test(value)) {
+      issues.push({ field, reason: "generic filler" });
+      continue;
+    }
+
+    const minWords = workflowFieldMinWords(field);
+    if (countWords(value) < minWords) {
+      issues.push({ field, reason: `under ${minWords} words` });
+      continue;
+    }
+
+    if (field === "title" && isGenericProductTitle(value)) {
+      issues.push({ field, reason: "generic product title" });
+      continue;
+    }
+
+    if (["manualWorkaroundToday", "messyInput"].includes(field) && !CONCRETE_INPUT_REGEX.test(value)) {
+      issues.push({ field, reason: "does not mention a concrete input" });
+      continue;
+    }
+
+    if (["outputArtifact", "beforeAfterDemo"].includes(field) && !CONCRETE_ARTIFACT_REGEX.test(value)) {
+      issues.push({ field, reason: "does not mention a concrete artifact" });
+      continue;
+    }
+
+    if (["painfulMoment", "broadSaasNotEnoughReason"].includes(field) && !CONCRETE_EVENT_REGEX.test(value)) {
+      issues.push({ field, reason: "does not mention a concrete event" });
+      continue;
+    }
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues,
+    missingFields: issues.map((issue) => issue.field),
+  };
+}
+
+export function workflowFieldValue(idea: HiddenWorkflowIdeaFields, field: RequiredWorkflowField) {
+  if (field === "exactBuyer") return normalizeTitle(idea.exactBuyer ?? idea.targetBuyer ?? "");
+  if (field === "sourceCodeOwnershipAngle") {
+    return normalizeTitle(idea.sourceCodeOwnershipAngle ?? idea.whyBuySourceCode ?? "");
+  }
+  if (field === "initialSearchQueries") return (idea.initialSearchQueries ?? []).join(" | ");
+  return normalizeTitle(String(idea[field as keyof HiddenWorkflowIdeaFields] ?? ""));
+}
+
+function workflowFieldMinWords(field: RequiredWorkflowField) {
+  switch (field) {
+    case "title":
+      return 1;
+    case "exactBuyer":
+      return 3;
+    case "messyInput":
+      return 5;
+    case "outputArtifact":
+      return 4;
+    case "buildComplexity":
+    case "initialSearchQueries":
+      return 1;
+    default:
+      return 8;
+  }
+}
 
 const GENERIC_TITLE_TERMS = [
   "tracker",
@@ -188,14 +325,7 @@ export function isGenericProductTitle(title: string) {
 }
 
 export function hasHiddenWorkflowSpecificity(idea: HiddenWorkflowIdeaFields) {
-  const titleOk = !isGenericProductTitle(idea.title);
-  const buyerOk = Boolean(idea.targetBuyer && idea.targetBuyer.trim().length >= 6);
-  const workaroundOk = Boolean(idea.manualWorkaroundToday && idea.manualWorkaroundToday.trim().length >= 10);
-  const messyInputOk = Boolean(idea.messyInput && idea.messyInput.trim().length >= 4);
-  const artifactOk = Boolean(idea.outputArtifact && idea.outputArtifact.trim().length >= 4);
-  const painfulMomentOk = Boolean(idea.painfulMoment && idea.painfulMoment.trim().length >= 6);
-
-  return titleOk && buyerOk && workaroundOk && messyInputOk && artifactOk && painfulMomentOk;
+  return validateRequiredWorkflowFields(idea).valid;
 }
 
 export function rewriteGenericIdeaToWorkflowGap(

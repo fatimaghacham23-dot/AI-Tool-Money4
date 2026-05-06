@@ -46,6 +46,14 @@ export type ReportContext = {
   whyOthersLost?: Array<{ title: string; reason: string }>;
   finalDecision?: FinalDecision;
   finalDecisionReason?: string;
+  killSwitchRejectAll?: boolean;
+  marketSearchRan?: boolean;
+  removedWorkflowIdeas?: Array<{
+    title: string;
+    reason: string;
+    missingFields?: string[];
+    suggestedRepairDirection?: string;
+  }>;
 };
 
 type ReportDebugOptions = {
@@ -130,6 +138,9 @@ export function createDeterministicReport(
   const dayOneSaleProbability = winner.score.total_score;
 
   if (finalDecision === "reject_all") {
+    if (context.killSwitchRejectAll) {
+      return createKillSwitchRejectAllReport(run, context);
+    }
     return createRejectAllReport(run, winner, context, dayOneSaleProbability, options);
   }
 
@@ -745,6 +756,81 @@ function createNicheDowns(winner: ScoredProductIdea) {
     `${winner.title} focused on one painful manual workaround from ${winner.pain}`,
     `${winner.title} as a source-code kit for a niche implementation service, not a broad SaaS category`,
   ];
+}
+
+
+function createKillSwitchRejectAllReport(
+  run: CouncilRunInput,
+  context: ReportContext,
+): FinalReportDraft {
+  const removed = context.removedWorkflowIdeas ?? [];
+  const rows = removed.length
+    ? removed
+        .map(
+          (item) =>
+            `| ${item.title} | ${item.reason} | ${(item.missingFields ?? []).join(", ") || "required workflow field quality"} | ${item.suggestedRepairDirection ?? "Add concrete manual workaround, messy input, output artifact, and painful moment."} |`,
+        )
+        .join("\n")
+    : "| No valid Round 1 objects created | Round 1 failed to produce valid hidden workflow objects. | all required workflow fields | Regenerate from observed manual workflows before naming products. |";
+
+  const reportMarkdown = `# Reject All
+
+Reject all. Generate better hidden-gap ideas or add stronger market evidence.
+
+## Kill-Switch Explanation
+Round 1 failed to produce valid hidden workflow objects.
+
+Market search was not run. Round 2 and Round 3 were not run because fewer than 5 valid hidden-workflow objects survived Round 1 extraction and the one repair attempt.
+
+## Where Failure Happened
+Round 1 / Round 1.5 hard stop: ideas were rejected before scoring, before shortlisting, and before market search.
+
+## Removed Ideas
+| Removed idea | Removal reason | Missing fields | Suggested repair direction |
+| --- | --- | --- | --- |
+${rows}
+
+## What Round 1 Must Produce Next
+- Start from a real manual workaround, not a product category.
+- Name the exact buyer, messy input, manual workaround, output artifact, and painful moment before naming a product.
+- Explain why broad SaaS tools do not assemble the proof/report/pack the buyer needs.
+- Include concrete source-code ownership customization angles and five artifact-specific search queries.
+
+## Better Prompt For Next Council Run
+\`\`\`text
+Find hidden manual workflows for ${run.targetBuyer ?? "a narrow buyer segment"}.
+Reject product-name-only ideas. For every idea include title, exactBuyer, manualWorkaroundToday, messyInput, outputArtifact, painfulMoment, broadSaasNotEnoughReason, beforeAfterDemo, sourceCodeOwnershipAngle, initialSearchQueries, and buildComplexity.
+\`\`\`
+
+# Existing Tool Check
+Not run. The pipeline stopped before market search because Round 1 failed structure validation.
+
+# Hidden Workflow Gap
+No generated idea was eligible for hidden-workflow gap evaluation because required workflow fields were missing or vague.
+
+# Fast Validation Test
+Do not validate these ideas. Repair Round 1 generation first, then rerun the council.
+
+# Market Evidence Used
+- Market search was not run.
+
+# Codex Build Blueprint
+No build blueprint should be generated for this run.
+`;
+
+  return {
+    winnerProductId: undefined,
+    finalDecision: "reject_all",
+    dayOneSaleProbability: undefined,
+    reportMarkdown,
+    linkedinPost: "No launch post. Market search was not run because Round 1 failed hidden-workflow validation.",
+    dmScript: "No sales DM. Repair Round 1 hidden-workflow fields before contacting buyers.",
+    demoVideoScript: "No demo video. No idea survived to a demo-worthy shortlist.",
+    buildPlan: [],
+    packagingChecklist: [],
+    codexBuildBlueprint: "No build blueprint. Round 1 failed to produce valid hidden workflow objects.",
+    codexPrompt: "Repair Round 1 hidden-workflow idea generation before building.",
+  };
 }
 
 function createRejectAllReport(

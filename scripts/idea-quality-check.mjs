@@ -162,6 +162,54 @@ const GENERIC_WORDS = new Set([
   "small",
 ]);
 
+
+const GENERIC_FILLER_REGEX = /\b(helps?\s+(agencies|teams|businesses|buyers)\s+save\s+time|save\s+time|streamline\s+(workflows?|operations?|processes?)|automate\s+(workflows?|tasks?|processes?)|customize\s+and\s+resell\s+immediately|polished\s+client-facing\s+product)\b/i;
+const CONCRETE_INPUT_REGEX = /\b(slack|email|gmail|outlook|screenshot|screenshots|loom|figma|doc|docs|google\s+doc|notion|spreadsheet|sheet|csv|pdf|contract|invoice|proposal|thread|transcript|meeting\s+notes|comments?|change\s+request|signoff|approval)\b/i;
+const CONCRETE_ARTIFACT_REGEX = /\b(pack|proof|log|report|artifact|checklist|brief|summary|response|reply|template|audit|trail|evidence|ledger|packet|handoff|timeline|matrix|record|extract)\b/i;
+const CONCRETE_EVENT_REGEX = /\b(client|customer|prospect|approv|signoff|change|request|scope|invoice|payment|overdue|dispute|revision|feedback|contract|clause|handoff|deadline|meeting|call|thread|message|screenshot)\b/i;
+
+function validateRequiredWorkflowFields(idea) {
+  const issues = [];
+  const fields = [
+    "title",
+    "exactBuyer",
+    "manualWorkaroundToday",
+    "messyInput",
+    "outputArtifact",
+    "painfulMoment",
+    "broadSaasNotEnoughReason",
+    "beforeAfterDemo",
+    "sourceCodeOwnershipAngle",
+    "initialSearchQueries",
+    "buildComplexity",
+  ];
+  for (const field of fields) {
+    if (field === "initialSearchQueries") {
+      if (!Array.isArray(idea.initialSearchQueries) || idea.initialSearchQueries.length < 5) issues.push({ field, reason: "missing queries" });
+      continue;
+    }
+    if (field === "buildComplexity") {
+      if (!/^(low|medium|high)$/i.test(idea.buildComplexity ?? "")) issues.push({ field, reason: "missing complexity" });
+      continue;
+    }
+    const value = field === "exactBuyer" ? (idea.exactBuyer ?? idea.targetBuyer ?? "") : field === "sourceCodeOwnershipAngle" ? (idea.sourceCodeOwnershipAngle ?? idea.whyBuySourceCode ?? "") : (idea[field] ?? "");
+    if (!String(value).trim()) { issues.push({ field, reason: "empty" }); continue; }
+    if (GENERIC_FILLER_REGEX.test(value)) { issues.push({ field, reason: "generic filler" }); continue; }
+    const words = String(value).trim().split(/\s+/).filter(Boolean).length;
+    const min = field === "title" ? 1 : field === "exactBuyer" ? 3 : field === "messyInput" ? 5 : field === "outputArtifact" ? 4 : 8;
+    if (words < min) { issues.push({ field, reason: `under ${min} words` }); continue; }
+    if (["manualWorkaroundToday", "messyInput"].includes(field) && !CONCRETE_INPUT_REGEX.test(value)) issues.push({ field, reason: "no concrete input" });
+    if (["outputArtifact", "beforeAfterDemo"].includes(field) && !CONCRETE_ARTIFACT_REGEX.test(value)) issues.push({ field, reason: "no concrete artifact" });
+    if (["painfulMoment", "broadSaasNotEnoughReason"].includes(field) && !CONCRETE_EVENT_REGEX.test(value)) issues.push({ field, reason: "no concrete event" });
+  }
+  return { valid: issues.length === 0, issues, missingFields: issues.map((issue) => issue.field) };
+}
+
+function createKillSwitchRejectAllReport(removedIdeas) {
+  const rows = removedIdeas.map((item) => `| ${item.title} | ${item.reason} | ${(item.missingFields ?? []).join(", ")} | ${item.suggestedRepairDirection} |`).join("\n");
+  return `# Reject All\n\nReject all. Generate better hidden-gap ideas or add stronger market evidence.\n\n## Kill-Switch Explanation\nRound 1 failed to produce valid hidden workflow objects.\n\nMarket search was not run. Round 2 and Round 3 were not run because fewer than 5 valid hidden-workflow objects survived Round 1 extraction and the one repair attempt.\n\n## Removed Ideas\n| Removed idea | Removal reason | Missing fields | Suggested repair direction |\n| --- | --- | --- | --- |\n${rows}\n\n# Existing Tool Check\nNot run. The pipeline stopped before market search because Round 1 failed structure validation.\n\n# Hidden Workflow Gap\nNo generated idea was eligible.\n`;
+}
+
 const CONCRETE_WORKFLOW_NOUNS =
   /\b(approval|signoff|revision|feedback|scope|handoff|promise|contradiction|dispute|drift|proof|log|report|pack|builder|detector|resolver|extractor|spreadsheet|template|record|trail|figma|slack|loom|screenshot|email|doc|docs|comment|change|source code|boilerplate|github)\b/i;
 
@@ -351,6 +399,74 @@ assert.equal(isBadSearchPhrase("writing proposals is repetitive and slows proof 
     painfulMoment: "They keep rebuilding the same client portal because buyer wants a faster path",
   });
   assert.ok(!directions.some((query) => /\bthey\b|buyer wants|faster path|they keep rebuilding/i.test(query)), directions.join(" | "));
+}
+
+
+// 7) Required workflow field checks reject missing and generic Round 1 fields.
+{
+  const missing = validateRequiredWorkflowFields({
+    title: "Slack Approval Reversal Proof Pack",
+    exactBuyer: "small web design agencies",
+    manualWorkaroundToday: "",
+    messyInput: "Slack approval thread, later change request, screenshot of original signoff",
+    outputArtifact: "client-ready approval reversal proof pack",
+    painfulMoment: "client says the new request was already included after previously approving the scope",
+    broadSaasNotEnoughReason: "project management tools store messages but do not assemble approval-change proof for uncomfortable client conversations",
+    beforeAfterDemo: "paste Slack thread and change request, then generate a proof pack with original approval, changed request, and suggested reply",
+    sourceCodeOwnershipAngle: "agencies can customize proof templates, client wording, and evidence rules for their niche",
+    initialSearchQueries: ["Slack approval reversal proof pack", "client changed request after approval proof", "track approval reversal manually", "approval change proof template agency", "Slack approval proof source code"],
+    buildComplexity: "medium",
+  });
+  assert.equal(missing.valid, false);
+  assert.ok(missing.missingFields.includes("manualWorkaroundToday"));
+
+  const generic = validateRequiredWorkflowFields({
+    title: "Slack Approval Reversal Proof Pack",
+    exactBuyer: "small web design agencies",
+    manualWorkaroundToday: "helps agencies save time while managing all client communication workflows",
+    messyInput: "Slack approval thread, later change request, screenshot of original signoff",
+    outputArtifact: "client-ready approval reversal proof pack",
+    painfulMoment: "client says the new request was already included after previously approving the scope",
+    broadSaasNotEnoughReason: "project management tools store messages but do not assemble approval-change proof for uncomfortable client conversations",
+    beforeAfterDemo: "paste Slack thread and change request, then generate a proof pack with original approval, changed request, and suggested reply",
+    sourceCodeOwnershipAngle: "agencies can customize proof templates, client wording, and evidence rules for their niche",
+    initialSearchQueries: ["Slack approval reversal proof pack", "client changed request after approval proof", "track approval reversal manually", "approval change proof template agency", "Slack approval proof source code"],
+    buildComplexity: "medium",
+  });
+  assert.equal(generic.valid, false);
+}
+
+// 8) Valid Slack approval reversal proof idea passes deterministic checks.
+{
+  const valid = validateRequiredWorkflowFields({
+    title: "Slack Approval Reversal Proof Pack",
+    exactBuyer: "small web design agencies",
+    manualWorkaroundToday: "paste Slack approval messages into a Google Doc to prove the client changed direction after approval",
+    messyInput: "Slack approval thread, later change request, screenshot of original signoff",
+    outputArtifact: "client-ready approval reversal proof pack",
+    painfulMoment: "client says the new request was already included after previously approving the scope",
+    broadSaasNotEnoughReason: "project management tools store messages but do not assemble approval-change proof for uncomfortable client conversations",
+    beforeAfterDemo: "paste Slack thread and change request, then generate a proof pack with original approval, changed request, and suggested reply",
+    sourceCodeOwnershipAngle: "agencies can customize proof templates, client wording, and evidence rules for their niche",
+    initialSearchQueries: ["Slack approval reversal proof pack", "client changed request after approval proof", "track approval reversal manually", "approval change proof template agency", "Slack approval proof source code"],
+    buildComplexity: "medium",
+  });
+  assert.equal(valid.valid, true, JSON.stringify(valid.issues));
+}
+
+// 9) Kill-switch reject_all report avoids fake scoring and explains market search did not run.
+{
+  const report = createKillSwitchRejectAllReport([
+    {
+      title: "Proposal Generator For Agencies",
+      reason: "Round 1 failed to produce valid hidden workflow object.",
+      missingFields: ["manualWorkaroundToday"],
+      suggestedRepairDirection: "Ground it in a concrete proposal thread, manual copy/paste workaround, output pack, and painful client event.",
+    },
+  ]);
+  assert.ok(!/Score Breakdown|Day-One Sale Probability|71\/100|Market Search Reality Check|Ideas Too Crowded/i.test(report), report);
+  assert.ok(/Market search was not run/i.test(report), report);
+  assert.ok(/Round 1 failed to produce valid hidden workflow objects/i.test(report), report);
 }
 
 console.log("idea-quality-check: OK");

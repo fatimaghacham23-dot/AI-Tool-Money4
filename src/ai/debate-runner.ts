@@ -40,7 +40,11 @@ import {
   hasHiddenWorkflowSpecificity,
   isGenericProductTitle,
   normalizeProductTitle,
+  REQUIRED_WORKFLOW_FIELDS,
   rewriteGenericIdeaToWorkflowGap,
+  validateRequiredWorkflowFields,
+  workflowFieldValue,
+  type WorkflowFieldIssue,
 } from "@/ai/idea-quality";
 import type { RunDebugTracer } from "@/lib/debug/run-debug-tracer";
 import { normalizeStrengthScore } from "@/lib/db/market-evidence";
@@ -101,9 +105,18 @@ type DebateState = {
   finalDecision?: FinalDecision;
   finalDecisionReason?: string;
   workflowDiscoveryBrief?: string;
+  round1ExtractionRemoved?: Round1RemovedIdea[];
 };
 
 type RoundRecord = DebateRoundDraft & { id: string };
+
+type Round1RemovedIdea = {
+  idea: ProductIdeaDraft;
+  reason: string;
+  missingFields: string[];
+  suggestedRepairDirection: string;
+  issues?: WorkflowFieldIssue[];
+};
 
 type IdeasResponse = {
   ideas: ProductIdeaDraft[];
@@ -272,6 +285,7 @@ export async function runCouncilDebate({
     marketSearchStatus: "pending",
     scoreHistory: [],
     whyOthersLost: [],
+    round1ExtractionRemoved: [],
   };
 
   tracer?.startStep("start_debate_runner", {
@@ -1049,6 +1063,7 @@ async function runGenericIdeaKillSwitch(
   persistence?: DebatePersistence,
 ): Promise<KillSwitchResult> {
   const original = state.ideas;
+  const round1Removed = state.round1ExtractionRemoved ?? [];
   const rejected: Array<{ title: string; reason: string }> = [];
   const removedIdeas: Array<{ idea: ProductIdeaDraft; reason: string }> = [];
 
@@ -1114,7 +1129,7 @@ async function runGenericIdeaKillSwitch(
     );
   }
 
-  if (survivors.length === 0) {
+  if (survivors.length < 5) {
     tracer?.addEvent({
       step: "kill_switch_reject_all",
       status: "ok",
@@ -1124,12 +1139,13 @@ async function runGenericIdeaKillSwitch(
       model: modelForRound(agent, provider, round),
       details: {
         originalIdeas: original.map((idea) => idea.title),
-        survivingIdeas: [],
+        survivingIdeas: survivors.map((idea) => idea.title),
         removedIdeas: removedIdeas.map((item) => item.idea.title),
+        round1ExtractionRemoved: round1Removed.map((item) => item.idea.title),
         reasons: removedIdeas.map((item) => ({ title: item.idea.title, reason: item.reason })),
       },
     });
-    return { originalIdeas: original, survivingIdeas: survivors, removedIdeas };
+    return { originalIdeas: original, survivingIdeas: [], removedIdeas: [...removedIdeas, ...round1Removed.map((item) => ({ idea: item.idea, reason: item.reason }))] };
   }
 
   if (survivors.length >= 5 || !round) {
@@ -1175,6 +1191,7 @@ Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
   "ideas": [
     {
       "title": "string",
+      "exactBuyer": "string",
       "target_buyer": "string",
       "manualWorkaroundToday": "string",
       "messyInput": "string",
@@ -1182,9 +1199,10 @@ Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
       "painfulMoment": "string",
       "broadSaasNotEnoughReason": "string",
       "beforeAfterDemo": "string",
+      "sourceCodeOwnershipAngle": "string",
       "why_buy_source_code": "string",
       "initialSearchQueries": ["string"],
-      "build_complexity": "low | medium | high"
+      "buildComplexity": "low | medium | high"
     }
   ]
 }
@@ -1438,6 +1456,206 @@ async function recordMessage(
   });
 }
 
+
+function validateRound1IdeaExtraction(
+  ideas: ProductIdeaDraft[],
+  tracer: RunDebugTracer | undefined,
+  round: RoundRecord | undefined,
+  agent: CouncilAgent,
+  provider: AIProvider,
+  model: string,
+) {
+  const valid: ProductIdeaDraft[] = [];
+  const removed: Round1RemovedIdea[] = [];
+
+  for (const idea of ideas) {
+    const validation = validateRequiredWorkflowFields(idea);
+    if (validation.valid) {
+      valid.push(idea);
+      continue;
+    }
+
+    const missingFields = validation.missingFields;
+    const suggestedRepairDirection = createRound1RepairDirection(idea, missingFields);
+    removed.push({
+      idea,
+      reason: "Round 1 failed to produce valid hidden workflow object.",
+      missingFields,
+      suggestedRepairDirection,
+      issues: validation.issues,
+    });
+    tracer?.addEvent({
+      step: "required_workflow_fields_missing",
+      status: "ok",
+      round: round?.title,
+      agent: agent.name,
+      provider: provider.name,
+      model,
+      details: {
+        title: truncateText(idea.title, 140),
+        missingFields,
+        issues: validation.issues,
+      },
+    });
+  }
+
+  return { valid, removed };
+}
+
+function createRound1RepairDirection(idea: ProductIdeaDraft, missingFields: string[]) {
+  const title = idea.title || "untitled idea";
+  const fieldList = missingFields.join(", ");
+  return `Repair ${title} by grounding ${fieldList} in a named buyer, their current Slack/email/docs/spreadsheet input, the manual steps they take today, the client event that hurts, and the exact proof/report/pack artifact generated.`;
+}
+
+function renderRound1RepairInput(removed: Round1RemovedIdea[]) {
+  return removed
+    .slice(0, 12)
+    .map((item) => ({
+      title: item.idea.title,
+      exactBuyer: workflowFieldValue(item.idea, "exactBuyer"),
+      missingFields: item.missingFields,
+      invalidValues: Object.fromEntries(
+        REQUIRED_WORKFLOW_FIELDS.map((field) => [field, workflowFieldValue(item.idea, field)]),
+      ),
+      suggestedRepairDirection: item.suggestedRepairDirection,
+    }));
+}
+
+async function repairRound1Ideas({
+  state,
+  provider,
+  agent,
+  round,
+  tracer,
+  persistence,
+  validIdeas,
+  removedIdeas,
+  model,
+}: {
+  state: DebateState;
+  provider: AIProvider;
+  agent: CouncilAgent;
+  round?: RoundRecord;
+  tracer?: RunDebugTracer;
+  persistence?: DebatePersistence;
+  validIdeas: ProductIdeaDraft[];
+  removedIdeas: Round1RemovedIdea[];
+  model: string;
+}) {
+  if (!round || validIdeas.length >= 5 || removedIdeas.length === 0) {
+    return { valid: validIdeas, removed: removedIdeas };
+  }
+
+  tracer?.addEvent({
+    step: "round1_repair_attempted",
+    status: "start",
+    round: round.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: {
+      validIdeas: validIdeas.length,
+      removedIdeas: removedIdeas.length,
+    },
+  });
+
+  const repairInput = renderRound1RepairInput(removedIdeas);
+  const { response } = await callModelJSON<IdeasResponse>({
+    state,
+    provider,
+    agent,
+    round,
+    tracer,
+    persistence,
+    mode: "idea_generation",
+    buildPrompt: (context) => `
+Round 1 produced incomplete hidden-workflow objects.
+
+Repair ONLY the missing/invalid fields for the removed ideas below. Do not invent broad SaaS categories. Do not return product-name-only ideas. Preserve each original title unless the title itself is listed as missing/invalid. Require concrete values for manualWorkaroundToday, messyInput, outputArtifact, and painfulMoment.
+
+Removed ideas with exact missing fields:
+${JSON.stringify(repairInput, null, 2)}
+
+Hard requirements:
+- JSON only.
+- Return only fully repaired ideas that satisfy every required field.
+- manualWorkaroundToday, messyInput, outputArtifact, painfulMoment, broadSaasNotEnoughReason, beforeAfterDemo, and sourceCodeOwnershipAngle must be concrete, not generic filler.
+- Do not use phrases like "helps agencies save time", "customize and resell immediately", or "polished client-facing product".
+- Do not create broad SaaS categories like proposal generator, invoice tool, support inbox, dashboard, portal, tracker, or manager unless the title includes the weird exact workflow artifact and painful event.
+- initialSearchQueries must contain at least 5 concrete artifact/workflow search phrases.
+
+Compact council context:
+${context}
+
+Return JSON only:
+{
+  "ideas": [
+    {
+      "title": "string",
+      "exactBuyer": "string",
+      "target_buyer": "string",
+      "manualWorkaroundToday": "string",
+      "messyInput": "string",
+      "outputArtifact": "string",
+      "painfulMoment": "string",
+      "broadSaasNotEnoughReason": "string",
+      "beforeAfterDemo": "string",
+      "sourceCodeOwnershipAngle": "string",
+      "why_buy_source_code": "string",
+      "initialSearchQueries": ["string"],
+      "buildComplexity": "low | medium | high"
+    }
+  ]
+}
+`,
+    fallback: { ideas: [] },
+    expectedSchema: "IdeasResponse",
+    temperature: 0.25,
+    maxTokens: 2200,
+    okDetails: (response) => ({
+      repairedIdeasExtracted: Array.isArray(response.ideas) ? response.ideas.length : 0,
+    }),
+  });
+
+  const repaired = applyIdeaQualityRewrites(
+    normalizeIdeas(response.ideas),
+    state,
+    tracer,
+    round,
+    agent,
+    provider,
+    model,
+  );
+  const repairValidation = validateRound1IdeaExtraction(repaired, tracer, round, agent, provider, model);
+  const mergedValid = dedupeIdeaCandidates(
+    uniqueByTitle([...validIdeas, ...repairValidation.valid]),
+    tracer,
+    round,
+    agent,
+    provider.name,
+    "round1_repair",
+  ).ideas;
+  const mergedRemoved = [...removedIdeas, ...repairValidation.removed];
+  const succeeded = mergedValid.length >= 5;
+
+  tracer?.addEvent({
+    step: succeeded ? "round1_repair_succeeded" : "round1_repair_failed",
+    status: succeeded ? "ok" : "failed",
+    round: round.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: {
+      validIdeas: mergedValid.length,
+      repairedReturned: repaired.length,
+      repairedValid: repairValidation.valid.length,
+    },
+  });
+
+  return { valid: mergedValid, removed: mergedRemoved };
+}
+
 async function generateIdeas(
   state: DebateState,
   provider: AIProvider,
@@ -1498,6 +1716,38 @@ Hard bans:
 - If the title could be a common SaaS category, rewrite it until it is weirdly specific.
 - Product title max 8 words. Use workflow artifact + painful event + niche buyer. Never paste a comma-separated buyer list into the title.
 - Initial Exa search queries must be concrete artifact/workflow phrases. Do not include "They want...", "They need...", broad goals, or the full target buyer list.
+- Round 1 will discard any object missing title, exactBuyer, manualWorkaroundToday, messyInput, outputArtifact, painfulMoment, broadSaasNotEnoughReason, beforeAfterDemo, sourceCodeOwnershipAngle, initialSearchQueries, or buildComplexity.
+- Required narrative fields must name a concrete input/artifact/event, not generic filler.
+
+Bad idea (will be rejected):
+{
+  "title": "Proposal Generator For Agencies",
+  "manualWorkaroundToday": "",
+  "messyInput": "",
+  "outputArtifact": "",
+  "painfulMoment": ""
+}
+
+Good idea:
+{
+  "title": "Slack Approval Reversal Proof Pack",
+  "exactBuyer": "small web design agencies",
+  "manualWorkaroundToday": "paste Slack approval messages into a Google Doc to prove the client changed direction after approval",
+  "messyInput": "Slack approval thread, later change request, screenshot of original signoff",
+  "outputArtifact": "client-ready approval reversal proof pack",
+  "painfulMoment": "client says the new request was already included after previously approving the scope",
+  "broadSaasNotEnoughReason": "project management tools store messages but do not assemble approval-change proof for uncomfortable client conversations",
+  "beforeAfterDemo": "paste Slack thread and change request, then generate a proof pack with original approval, changed request, and suggested reply",
+  "sourceCodeOwnershipAngle": "agencies can customize proof templates, client wording, and evidence rules for their niche",
+  "initialSearchQueries": [
+    "Slack approval reversal proof pack",
+    "client changed request after approval proof",
+    "track approval reversal manually",
+    "approval change proof template agency",
+    "Slack approval proof source code"
+  ],
+  "buildComplexity": "medium"
+}
 
 Workflow discovery brief (authoritative):
 ${workflowDiscoveryBrief}
@@ -1510,6 +1760,7 @@ Return JSON only:
   "ideas": [
     {
       "title": "string",
+      "exactBuyer": "string",
       "target_buyer": "string",
       "manualWorkaroundToday": "string",
       "messyInput": "string",
@@ -1517,9 +1768,10 @@ Return JSON only:
       "painfulMoment": "string",
       "broadSaasNotEnoughReason": "string",
       "beforeAfterDemo": "string",
+      "sourceCodeOwnershipAngle": "string",
       "why_buy_source_code": "string",
       "initialSearchQueries": ["string"],
-      "build_complexity": "low | medium | high"
+      "buildComplexity": "low | medium | high"
     }
   ]
 }
@@ -1535,7 +1787,7 @@ Return JSON only:
 
     const normalized = normalizeIdeas(response.ideas).slice(0, 12);
     const rewritten = applyIdeaQualityRewrites(normalized, state, tracer, round, agent, provider, model);
-    return dedupeIdeaCandidates(
+    const deduped = dedupeIdeaCandidates(
       rewritten,
       tracer,
       round,
@@ -1543,6 +1795,20 @@ Return JSON only:
       provider.name,
       "initial_generation",
     ).ideas;
+    const initialValidation = validateRound1IdeaExtraction(deduped, tracer, round, agent, provider, model);
+    const repaired = await repairRound1Ideas({
+      state,
+      provider,
+      agent,
+      round,
+      tracer,
+      persistence,
+      validIdeas: initialValidation.valid,
+      removedIdeas: initialValidation.removed,
+      model,
+    });
+    state.round1ExtractionRemoved = repaired.removed;
+    return repaired.valid.slice(0, 12);
   } catch (error) {
     attachFailureMetadata(error, {
       failedStep: "model_call",
@@ -2074,25 +2340,17 @@ async function finishRejectAllAfterKillSwitch({
   tracer?: RunDebugTracer;
 }): Promise<DebateArtifacts> {
   state.finalDecision = "reject_all";
-  state.finalDecisionReason =
-    "All generated ideas were removed by the generic/structure kill switch before market search.";
+  state.finalDecisionReason = "Round 1 failed to produce valid hidden workflow objects.";
   state.shortlist = [];
   state.toolExistenceChecks = [];
   state.marketSearchStatus = "completed";
 
-  const scoredIdeas = createMarketGateRejectedScores(killSwitchResult.originalIdeas, state).map((idea) => ({
-    ...idea,
-    scoreReason:
-      "Rejected before market search because Round 1.5 removed every idea for generic structure or missing hidden-workflow fields.",
-    lostReason:
-      killSwitchResult.removedIdeas.find((item) => item.idea.title === idea.title)?.reason ??
-      "Removed by Round 1.5 generic/structure kill switch.",
-  }));
-  const highestRejected = sortByScore(scoredIdeas)[0];
+  const removedWorkflowIdeas = buildKillSwitchRemovedIdeaRows(state, killSwitchResult);
+  const placeholderWinner = createKillSwitchPlaceholderWinner(state, removedWorkflowIdeas[0]?.title);
+  const scoredIdeas: ScoredProductIdea[] = [];
 
-  await persistence?.saveScores(scoredIdeas);
   await persistence?.updateIdeaStatuses(
-    killSwitchResult.originalIdeas.map((idea) => ({
+    [...killSwitchResult.originalIdeas, ...(state.round1ExtractionRemoved ?? []).map((item) => item.idea)].map((idea) => ({
       id: idea.id,
       title: idea.title,
       status: "rejected",
@@ -2102,12 +2360,17 @@ async function finishRejectAllAfterKillSwitch({
   const round8 = await createRound(7, persistence);
   const report = createDeterministicReport(
     state.run,
-    highestRejected,
+    placeholderWinner,
     {
       ...createReportContext(state, scoredIdeas),
       shortlistedIdeas: [],
+      scoredIdeas: [],
+      scoreHistory: [],
       finalDecision: "reject_all",
       finalDecisionReason: state.finalDecisionReason,
+      killSwitchRejectAll: true,
+      marketSearchRan: false,
+      removedWorkflowIdeas,
     },
     {
       onBetterDirectionGenerated: (direction) => {
@@ -2125,14 +2388,14 @@ async function finishRejectAllAfterKillSwitch({
       },
     },
   );
-  await persistence?.saveFinalReport(report, highestRejected);
+  await persistence?.saveFinalReport(report, placeholderWinner);
 
   await recordMessage(
     state,
     persistence,
     round8,
     judgeAgent,
-    "All generated ideas were removed by the generic/structure kill switch before market search.",
+    "Round 1 failed to produce valid hidden workflow objects. Market search was not run.",
     modelForRound(judgeAgent, provider, round8),
     provider.name,
   );
@@ -2161,8 +2424,59 @@ async function finishRejectAllAfterKillSwitch({
     toolExistenceChecks: state.toolExistenceChecks,
     shortlistedIdeas: state.shortlist,
     scoredIdeas,
-    winner: highestRejected,
+    winner: placeholderWinner,
     report,
+  };
+}
+
+function buildKillSwitchRemovedIdeaRows(state: DebateState, killSwitchResult: KillSwitchResult) {
+  const round1Removed = state.round1ExtractionRemoved ?? [];
+  const byTitle = new Map<string, {
+    title: string;
+    reason: string;
+    missingFields?: string[];
+    suggestedRepairDirection?: string;
+  }>();
+
+  for (const item of round1Removed) {
+    byTitle.set(item.idea.title, {
+      title: item.idea.title,
+      reason: item.reason,
+      missingFields: item.missingFields,
+      suggestedRepairDirection: item.suggestedRepairDirection,
+    });
+  }
+
+  for (const item of killSwitchResult.removedIdeas) {
+    if (byTitle.has(item.idea.title)) continue;
+    const validation = validateRequiredWorkflowFields(item.idea);
+    byTitle.set(item.idea.title, {
+      title: item.idea.title,
+      reason: item.reason,
+      missingFields: validation.missingFields,
+      suggestedRepairDirection: createRound1RepairDirection(item.idea, validation.missingFields),
+    });
+  }
+
+  return [...byTitle.values()];
+}
+
+function createKillSwitchPlaceholderWinner(state: DebateState, title?: string): ScoredProductIdea {
+  const score = normalizeScore({ total_score: 0 });
+  return {
+    title: title ?? "No Valid Hidden Workflow Object",
+    description: "Placeholder only; no idea survived Round 1 hidden-workflow validation.",
+    targetBuyer: state.run.targetBuyer ?? "Unknown buyer",
+    pain: "Round 1 did not provide enough structured workflow detail to score.",
+    whyBuySourceCode: "Not evaluated because the pipeline stopped before scoring.",
+    mvpFeatures: [],
+    fullFeatures: [],
+    pricingIdea: "Not evaluated",
+    risks: ["Round 1 failed to produce valid hidden workflow objects."],
+    status: "rejected",
+    score,
+    scoreReason: "Not scored. Market search was not run.",
+    lostReason: "Round 1 failed to produce valid hidden workflow objects.",
   };
 }
 
@@ -3586,6 +3900,9 @@ function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft
       why_buy_source_code?: string;
       demo_hook?: string;
       build_complexity?: string;
+      buildComplexity?: string;
+      exactBuyer?: string;
+      sourceCodeOwnershipAngle?: string;
       manualWorkaroundToday?: string;
       messyInput?: string;
       outputArtifact?: string;
@@ -3602,11 +3919,16 @@ function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft
       idea.description ?? raw.one_sentence,
       fallback[index]?.description ?? "A practical full-source-code product.",
     ),
-    targetBuyer: safeText(idea.targetBuyer ?? raw.target_buyer, "Agencies and technical founders"),
+    exactBuyer: safeText((idea as ProductIdeaDraft).exactBuyer ?? raw.exactBuyer ?? idea.targetBuyer ?? raw.target_buyer, "Agencies and technical founders"),
+    targetBuyer: safeText(idea.targetBuyer ?? raw.target_buyer ?? raw.exactBuyer, "Agencies and technical founders"),
     pain: safeText(idea.pain, raw.one_sentence ?? "The buyer wants to save implementation time."),
+    sourceCodeOwnershipAngle: safeText(
+      (idea as ProductIdeaDraft).sourceCodeOwnershipAngle ?? raw.sourceCodeOwnershipAngle ?? idea.whyBuySourceCode ?? raw.why_buy_source_code,
+      "",
+    ),
     whyBuySourceCode: safeText(
-      idea.whyBuySourceCode ?? raw.why_buy_source_code,
-      "The source code can be customized, rebranded, and resold as a service foundation.",
+      idea.whyBuySourceCode ?? raw.why_buy_source_code ?? raw.sourceCodeOwnershipAngle,
+      "The buyer can adapt evidence templates, workflow rules, and exports for their exact client process.",
     ),
     manualWorkaroundToday: safeText(
       (idea as ProductIdeaDraft).manualWorkaroundToday ?? raw.manualWorkaroundToday,
@@ -3628,9 +3950,10 @@ function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft
       : [safeText(raw.demo_hook, "Demo the core buyer workflow end to end.")],
     fullFeatures: safeList(idea.fullFeatures),
     pricingIdea: safeText(idea.pricingIdea, "$149-$499 source-code license"),
+    buildComplexity: safeText((idea as ProductIdeaDraft).buildComplexity ?? raw.buildComplexity ?? raw.build_complexity, "medium"),
     risks: safeList(idea.risks).length
       ? safeList(idea.risks)
-      : [`Build complexity: ${safeText(raw.build_complexity, "medium")}`],
+      : [`Build complexity: ${safeText((idea as ProductIdeaDraft).buildComplexity ?? raw.buildComplexity ?? raw.build_complexity, "medium")}`],
     status: "generated" as const,
   };
   });

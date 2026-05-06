@@ -62,8 +62,10 @@ export type ProductIdeaDraft = {
   title: string;
   description: string;
   targetBuyer: string;
+  exactBuyer?: string;
   pain: string;
   whyBuySourceCode: string;
+  sourceCodeOwnershipAngle?: string;
   manualWorkaroundToday?: string;
   messyInput?: string;
   outputArtifact?: string;
@@ -71,6 +73,7 @@ export type ProductIdeaDraft = {
   broadSaasNotEnoughReason?: string;
   beforeAfterDemo?: string;
   initialSearchQueries?: string[];
+  buildComplexity?: "low" | "medium" | "high" | string;
   nicheDownAttempts?: string[];
   genericRiskReason?: string;
   mvpFeatures: string[];
