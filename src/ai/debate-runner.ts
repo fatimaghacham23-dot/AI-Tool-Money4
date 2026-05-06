@@ -1,4 +1,8 @@
-import { agentByKey, DEFAULT_AGENTS, normalizeAgentForProvider } from "@/ai/agents";
+import {
+  agentByKey,
+  DEFAULT_AGENTS,
+  normalizeAgentForProvider,
+} from "@/ai/agents";
 import { runInteractiveCouncilChat } from "@/ai/interactive-council";
 import {
   applyMarketGapRules,
@@ -39,6 +43,7 @@ import {
   hasBadProductTitleQuality,
   hasHiddenWorkflowSpecificity,
   isGenericProductTitle,
+  normalizeInitialSearchQueries,
   normalizeProductTitle,
   REQUIRED_WORKFLOW_FIELDS,
   rewriteGenericIdeaToWorkflowGap,
@@ -105,15 +110,20 @@ type DebateState = {
   finalDecision?: FinalDecision;
   finalDecisionReason?: string;
   workflowDiscoveryBrief?: string;
+  round1RawIdeaCount?: number;
   round1ExtractionRemoved?: Round1RemovedIdea[];
 };
 
 type RoundRecord = DebateRoundDraft & { id: string };
 
 type Round1RemovedIdea = {
+  title: string;
   idea: ProductIdeaDraft;
   reason: string;
   missingFields: string[];
+  invalidFields: string[];
+  invalidReasons: string[];
+  rawKeys: string[];
   suggestedRepairDirection: string;
   issues?: WorkflowFieldIssue[];
 };
@@ -285,6 +295,7 @@ export async function runCouncilDebate({
     marketSearchStatus: "pending",
     scoreHistory: [],
     whyOthersLost: [],
+    round1RawIdeaCount: undefined,
     round1ExtractionRemoved: [],
   };
 
@@ -297,20 +308,34 @@ export async function runCouncilDebate({
     currentStep: "Preparing market evidence",
     progressPercent: 2,
   });
-  const hasPersistedEvidence = Boolean(run.marketEvidence?.some((item) => item.id));
+  const hasPersistedEvidence = Boolean(
+    run.marketEvidence?.some((item) => item.id),
+  );
   const initialEvidence = run.marketEvidence?.length
     ? run.marketEvidence
     : createInitialMarketEvidence(run);
-  tracer?.startStep("insert_market_evidence", { count: initialEvidence.length });
-  state.marketEvidence =
-    hasPersistedEvidence
-      ? initialEvidence
-      : (await persistence?.saveMarketEvidence?.(initialEvidence)) ?? initialEvidence;
-  tracer?.completeStep("insert_market_evidence", { count: state.marketEvidence.length });
+  tracer?.startStep("insert_market_evidence", {
+    count: initialEvidence.length,
+  });
+  state.marketEvidence = hasPersistedEvidence
+    ? initialEvidence
+    : ((await persistence?.saveMarketEvidence?.(initialEvidence)) ??
+      initialEvidence);
+  tracer?.completeStep("insert_market_evidence", {
+    count: state.marketEvidence.length,
+  });
 
   const round1 = await createRound(0, persistence);
-  const generatedIdeas = await generateIdeas(state, provider, sourceAgent, tracer, round1, persistence);
-  const ideas: ProductIdeaDraft[] = (await persistence?.saveIdeas(generatedIdeas)) ?? generatedIdeas;
+  const generatedIdeas = await generateIdeas(
+    state,
+    provider,
+    sourceAgent,
+    tracer,
+    round1,
+    persistence,
+  );
+  const ideas: ProductIdeaDraft[] =
+    (await persistence?.saveIdeas(generatedIdeas)) ?? generatedIdeas;
   state.ideas = ideas;
 
   await recordMessage(
@@ -324,7 +349,14 @@ export async function runCouncilDebate({
   );
 
   const round15 = await createRound(1, persistence);
-  const killSwitchResult = await runGenericIdeaKillSwitch(state, provider, sourceAgent, tracer, round15, persistence);
+  const killSwitchResult = await runGenericIdeaKillSwitch(
+    state,
+    provider,
+    sourceAgent,
+    tracer,
+    round15,
+    persistence,
+  );
 
   if (killSwitchResult.survivingIdeas.length === 0) {
     return finishRejectAllAfterKillSwitch({
@@ -339,9 +371,18 @@ export async function runCouncilDebate({
   }
 
   const round2 = await createRound(2, persistence);
-  const topResponse = await chooseTopIdeas(state, provider, skepticAgent, tracer, round2, persistence);
+  const topResponse = await chooseTopIdeas(
+    state,
+    provider,
+    skepticAgent,
+    tracer,
+    round2,
+    persistence,
+  );
   state.rejectedIdeas = topResponse.rejectedIdeas;
-  const rejectedTitles = new Set(topResponse.rejectedIdeas.map((idea) => idea.title));
+  const rejectedTitles = new Set(
+    topResponse.rejectedIdeas.map((idea) => idea.title),
+  );
   const topTitles = new Set(topResponse.topIdeas.map((idea) => idea.title));
 
   await persistence?.updateIdeaStatuses(
@@ -366,7 +407,9 @@ export async function runCouncilDebate({
   const shortlistedIdeas = state.ideas
     .filter((idea) => topTitles.has(idea.title))
     .slice(0, 5);
-  state.shortlist = shortlistedIdeas.length ? shortlistedIdeas : state.ideas.slice(0, 5);
+  state.shortlist = shortlistedIdeas.length
+    ? shortlistedIdeas
+    : state.ideas.slice(0, 5);
 
   await persistence?.updateIdeaStatuses(
     state.shortlist.map((idea) => ({
@@ -376,7 +419,14 @@ export async function runCouncilDebate({
     })),
   );
 
-  const shortlistResponse = await confirmShortlist(state, provider, builderAgent, tracer, round3, persistence);
+  const shortlistResponse = await confirmShortlist(
+    state,
+    provider,
+    builderAgent,
+    tracer,
+    round3,
+    persistence,
+  );
   applyShortlistRefinements(state, shortlistResponse, round3, builderAgent);
 
   await recordMessage(
@@ -391,7 +441,12 @@ export async function runCouncilDebate({
 
   const round4 = await createRound(4, persistence);
   await runMarketSearchRound(state, round4, persistence, tracer);
-  const gateResult = await applyPostMarketSearchGate(state, round4, persistence, tracer);
+  const gateResult = await applyPostMarketSearchGate(
+    state,
+    round4,
+    persistence,
+    tracer,
+  );
 
   if (gateResult.decision === "reject_all") {
     return finishRejectAllAfterMarketGate({
@@ -406,10 +461,24 @@ export async function runCouncilDebate({
   }
 
   const round5 = await createRound(5, persistence);
-  await runInteractiveDebateRound(state, provider, enabledAgents, round5, persistence, tracer);
+  await runInteractiveDebateRound(
+    state,
+    provider,
+    enabledAgents,
+    round5,
+    persistence,
+    tracer,
+  );
 
   const round6 = await createRound(6, persistence);
-  let scoredIdeas = await scoreShortlist(state, provider, judgeAgent, tracer, round6, persistence);
+  let scoredIdeas = await scoreShortlist(
+    state,
+    provider,
+    judgeAgent,
+    tracer,
+    round6,
+    persistence,
+  );
 
   await persistence?.saveScores(scoredIdeas);
   await recordMessage(
@@ -423,15 +492,24 @@ export async function runCouncilDebate({
   );
 
   const round7 = await createRound(7, persistence);
-  const judgeDecision = await chooseWinner(state, provider, judgeAgent, scoredIdeas, tracer, round7, persistence);
+  const judgeDecision = await chooseWinner(
+    state,
+    provider,
+    judgeAgent,
+    scoredIdeas,
+    tracer,
+    round7,
+    persistence,
+  );
 
   state.finalDecision = judgeDecision.finalDecision;
   state.finalDecisionReason = judgeDecision.reason;
   state.whyOthersLost = judgeDecision.whyOthersLost;
   scoredIdeas = scoredIdeas.map((idea) => ({
     ...idea,
-    lostReason: judgeDecision.whyOthersLost.find((lost) => lost.title === idea.title)
-      ?.reason,
+    lostReason: judgeDecision.whyOthersLost.find(
+      (lost) => lost.title === idea.title,
+    )?.reason,
   }));
   const winner =
     scoredIdeas.find((idea) => idea.title === judgeDecision.winner.title) ??
@@ -442,13 +520,14 @@ export async function runCouncilDebate({
     scoredIdeas.map((idea) => ({
       id: idea.id,
       title: idea.title,
-      status: judgeDecision.finalDecision === "reject_all"
-        ? "rejected"
-        : canBuildNow && idea.title === winner.title
-        ? "winner"
-        : idea.title === winner.title
-          ? "shortlisted"
-          : "backup",
+      status:
+        judgeDecision.finalDecision === "reject_all"
+          ? "rejected"
+          : canBuildNow && idea.title === winner.title
+            ? "winner"
+            : idea.title === winner.title
+              ? "shortlisted"
+              : "backup",
     })),
   );
 
@@ -463,7 +542,16 @@ export async function runCouncilDebate({
   );
 
   const round8 = await createRound(8, persistence);
-  const report = await generateReport(state, provider, judgeAgent, winner, scoredIdeas, tracer, round8, persistence);
+  const report = await generateReport(
+    state,
+    provider,
+    judgeAgent,
+    winner,
+    scoredIdeas,
+    tracer,
+    round8,
+    persistence,
+  );
 
   await persistence?.saveFinalReport(report, winner);
   const finalReportMessage =
@@ -549,7 +637,11 @@ function getMaxPromptChars(provider: AIProvider, model: string) {
   return 12000;
 }
 
-function modelForRound(agent: CouncilAgent, provider: AIProvider, round?: RoundRecord) {
+function modelForRound(
+  agent: CouncilAgent,
+  provider: AIProvider,
+  round?: RoundRecord,
+) {
   if (provider.name !== "github-models") {
     return agent.modelName;
   }
@@ -576,7 +668,8 @@ function isTokenLimitError(error: unknown) {
     message?: string;
     bodyExcerpt?: string;
   };
-  const text = `${value?.code ?? ""} ${value?.message ?? ""} ${value?.bodyExcerpt ?? ""}`.toLowerCase();
+  const text =
+    `${value?.code ?? ""} ${value?.message ?? ""} ${value?.bodyExcerpt ?? ""}`.toLowerCase();
 
   return (
     value?.status === 413 ||
@@ -645,7 +738,8 @@ function preparePrompt({
     droppedMessages,
     droppedIdeas,
     maxPromptChars,
-    contextCompressed: prompt.length !== beforeChars || droppedMessages > 0 || droppedIdeas > 0,
+    contextCompressed:
+      prompt.length !== beforeChars || droppedMessages > 0 || droppedIdeas > 0,
   };
 
   return { prompt, retryPrompt, metrics };
@@ -699,7 +793,10 @@ async function callModelJSON<T>({
     droppedMessages: prepared.metrics.droppedMessages,
     droppedIdeas: prepared.metrics.droppedIdeas,
     previousMessages: state.messages.length,
-    ideasCount: mode === "skeptic_filter" ? state.ideas.length : state.shortlist.length || state.ideas.length,
+    ideasCount:
+      mode === "skeptic_filter"
+        ? state.ideas.length
+        : state.shortlist.length || state.ideas.length,
     evidenceCount: state.marketEvidence.length,
   };
 
@@ -853,7 +950,12 @@ async function callModelJSON<T>({
             ...(okDetails?.(response) ?? {}),
           },
         });
-        return { response, modelUsed, retryHappened, metrics: prepared.metrics };
+        return {
+          response,
+          modelUsed,
+          retryHappened,
+          metrics: prepared.metrics,
+        };
       }
 
       throw secondError;
@@ -861,9 +963,13 @@ async function callModelJSON<T>({
   }
 }
 
-function buildWorkflowDiscoveryBrief(run: CouncilRunInput, evidence: MarketEvidenceDraft[]) {
+function buildWorkflowDiscoveryBrief(
+  run: CouncilRunInput,
+  evidence: MarketEvidenceDraft[],
+) {
   const buyer = (run.targetBuyer ?? "").trim() || "Unknown buyer";
-  const category = (run.productCategory ?? "").trim() || "No preferred category";
+  const category =
+    (run.productCategory ?? "").trim() || "No preferred category";
   const notes = (run.notes ?? "").trim();
   const evidenceNotes = (run.marketEvidenceNotes ?? "").trim();
   const evidenceSummary = summarizeMarketEvidence(evidence);
@@ -940,9 +1046,13 @@ function applyIdeaQualityRewrites(
   return ideas.map((idea) => {
     const buyer = idea.targetBuyer || buyerContext;
     const originalTitle = idea.title;
-    const originalHadTitleRisk = hasBadProductTitleQuality(originalTitle, buyer);
+    const originalHadTitleRisk = hasBadProductTitleQuality(
+      originalTitle,
+      buyer,
+    );
     let nextTitle = normalizeProductTitle(originalTitle, buyer);
-    const generic = isGenericProductTitle(originalTitle) || isGenericProductTitle(nextTitle);
+    const generic =
+      isGenericProductTitle(originalTitle) || isGenericProductTitle(nextTitle);
     let genericRiskReason = idea.genericRiskReason;
 
     if (generic) {
@@ -1015,7 +1125,11 @@ function dedupeIdeaCandidates(
 ) {
   const kept: ProductIdeaDraft[] = [];
   const fingerprints: string[] = [];
-  const removed: Array<{ removed: ProductIdeaDraft; kept: ProductIdeaDraft; fingerprint: string }> = [];
+  const removed: Array<{
+    removed: ProductIdeaDraft;
+    kept: ProductIdeaDraft;
+    fingerprint: string;
+  }> = [];
 
   for (const idea of ideas) {
     const fingerprint = getIdeaFingerprint(idea);
@@ -1097,7 +1211,10 @@ async function runGenericIdeaKillSwitch(
     }
 
     const demo = (idea.beforeAfterDemo ?? "").trim();
-    if (demo.length < 18 || /save time|automate|streamline|manage/i.test(demo)) {
+    if (
+      demo.length < 18 ||
+      /save time|automate|streamline|manage/i.test(demo)
+    ) {
       reject(idea, "Vague before/after demo", "vague_demo");
       return false;
     }
@@ -1114,7 +1231,10 @@ async function runGenericIdeaKillSwitch(
     })),
   );
   await persistence?.updateIdeaStatuses(
-    rejected.map((item) => ({ title: item.title, status: "rejected" as const })),
+    rejected.map((item) => ({
+      title: item.title,
+      status: "rejected" as const,
+    })),
   );
 
   if (round) {
@@ -1142,14 +1262,31 @@ async function runGenericIdeaKillSwitch(
         survivingIdeas: survivors.map((idea) => idea.title),
         removedIdeas: removedIdeas.map((item) => item.idea.title),
         round1ExtractionRemoved: round1Removed.map((item) => item.idea.title),
-        reasons: removedIdeas.map((item) => ({ title: item.idea.title, reason: item.reason })),
+        reasons: removedIdeas.map((item) => ({
+          title: item.idea.title,
+          reason: item.reason,
+        })),
       },
     });
-    return { originalIdeas: original, survivingIdeas: [], removedIdeas: [...removedIdeas, ...round1Removed.map((item) => ({ idea: item.idea, reason: item.reason }))] };
+    return {
+      originalIdeas: original,
+      survivingIdeas: [],
+      removedIdeas: [
+        ...removedIdeas,
+        ...round1Removed.map((item) => ({
+          idea: item.idea,
+          reason: item.reason,
+        })),
+      ],
+    };
   }
 
   if (survivors.length >= 5 || !round) {
-    return { originalIdeas: original, survivingIdeas: state.ideas, removedIdeas };
+    return {
+      originalIdeas: original,
+      survivingIdeas: state.ideas,
+      removedIdeas,
+    };
   }
 
   const model = modelForRound(agent, provider, round);
@@ -1192,7 +1329,6 @@ Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
     {
       "title": "string",
       "exactBuyer": "string",
-      "target_buyer": "string",
       "manualWorkaroundToday": "string",
       "messyInput": "string",
       "outputArtifact": "string",
@@ -1200,9 +1336,8 @@ Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
       "broadSaasNotEnoughReason": "string",
       "beforeAfterDemo": "string",
       "sourceCodeOwnershipAngle": "string",
-      "why_buy_source_code": "string",
-      "initialSearchQueries": ["string"],
-      "buildComplexity": "low | medium | high"
+      "initialSearchQueries": ["...", "...", "...", "..."],
+      "buildComplexity": "low|medium|high"
     }
   ]
 }
@@ -1223,7 +1358,11 @@ Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
     agent: agent.name,
     provider: provider.name,
     model,
-    details: { replacementCount: Array.isArray(response.ideas) ? response.ideas.length : 0 },
+    details: {
+      replacementCount: Array.isArray(response.ideas)
+        ? response.ideas.length
+        : 0,
+    },
   });
 
   const replacements = applyIdeaQualityRewrites(
@@ -1272,7 +1411,10 @@ function uniqueStrings(items: string[]) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
 }
 
-function deterministicNicheDownIdea(idea: ProductIdeaDraft, buyerContext: string): ProductIdeaDraft {
+function deterministicNicheDownIdea(
+  idea: ProductIdeaDraft,
+  buyerContext: string,
+): ProductIdeaDraft {
   const seed = titleHash(idea.title);
   const buyer = chooseDifferent(
     deriveBuyerNiches(idea.targetBuyer || buyerContext),
@@ -1321,13 +1463,20 @@ function deterministicNicheDownIdea(idea: ProductIdeaDraft, buyerContext: string
   const changedFields = [
     isMeaningfullyDifferent(idea.targetBuyer, buyer) ? "buyer_niche" : "",
     isMeaningfullyDifferent(idea.messyInput, messyInput) ? "messy_input" : "",
-    isMeaningfullyDifferent(idea.outputArtifact, outputArtifact) ? "output_artifact" : "",
-    isMeaningfullyDifferent(idea.painfulMoment || idea.pain, painfulMoment) ? "painful_event" : "",
+    isMeaningfullyDifferent(idea.outputArtifact, outputArtifact)
+      ? "output_artifact"
+      : "",
+    isMeaningfullyDifferent(idea.painfulMoment || idea.pain, painfulMoment)
+      ? "painful_event"
+      : "",
   ].filter(Boolean);
 
   const attempts = uniqueStrings([
     narrowedTitle,
-    normalizeProductTitle(`${singularInputLabel(messyInput)} ${painfulMoment} for ${buyer}`, buyer),
+    normalizeProductTitle(
+      `${singularInputLabel(messyInput)} ${painfulMoment} for ${buyer}`,
+      buyer,
+    ),
     normalizeProductTitle(`${outputArtifact} for ${buyer}`, buyer),
   ]).slice(0, 3);
 
@@ -1373,9 +1522,15 @@ function deriveBuyerNiches(buyer: string) {
   return uniqueStrings(niches);
 }
 
-function chooseDifferent(options: string[], current: string | undefined, seed: number) {
+function chooseDifferent(
+  options: string[],
+  current: string | undefined,
+  seed: number,
+) {
   const normalizedCurrent = normalizeComparable(current ?? "");
-  const available = options.filter((option) => normalizeComparable(option) !== normalizedCurrent);
+  const available = options.filter(
+    (option) => normalizeComparable(option) !== normalizedCurrent,
+  );
   const pool = available.length ? available : options;
   return pool[Math.abs(seed) % pool.length] ?? options[0] ?? "Niche Buyers";
 }
@@ -1397,14 +1552,21 @@ function isMeaningfullyDifferent(left: string | undefined, right: string) {
 }
 
 function normalizeComparable(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function titleHash(value: string) {
   return [...value].reduce((sum, char) => sum + char.charCodeAt(0), 0);
 }
 
-function progressForRound(roundNumber: number, step: "model_call" | "message_saved") {
+function progressForRound(
+  roundNumber: number,
+  step: "model_call" | "message_saved",
+) {
   const base = Math.max(0, roundNumber - 1) * 13;
   return Math.min(99, base + (step === "message_saved" ? 12 : 6));
 }
@@ -1456,7 +1618,6 @@ async function recordMessage(
   });
 }
 
-
 function validateRound1IdeaExtraction(
   ideas: ProductIdeaDraft[],
   tracer: RunDebugTracer | undefined,
@@ -1467,6 +1628,7 @@ function validateRound1IdeaExtraction(
 ) {
   const valid: ProductIdeaDraft[] = [];
   const removed: Round1RemovedIdea[] = [];
+  const fieldCounts = new Map<string, number>();
 
   for (const idea of ideas) {
     const validation = validateRequiredWorkflowFields(idea);
@@ -1476,14 +1638,33 @@ function validateRound1IdeaExtraction(
     }
 
     const missingFields = validation.missingFields;
-    const suggestedRepairDirection = createRound1RepairDirection(idea, missingFields);
+    const invalidFields = [
+      ...new Set(validation.issues.map((issue) => issue.field)),
+    ];
+    const invalidReasons = validation.issues.map(
+      (issue) => `${issue.field}: ${issue.reason}`,
+    );
+    for (const field of invalidFields) {
+      fieldCounts.set(field, (fieldCounts.get(field) ?? 0) + 1);
+    }
+    const suggestedRepairDirection = createRound1RepairDirection(
+      idea,
+      missingFields,
+    );
     removed.push({
+      title: idea.title || "Untitled Round 1 draft",
       idea,
       reason: "Round 1 failed to produce valid hidden workflow object.",
       missingFields,
+      invalidFields,
+      invalidReasons,
+      rawKeys: rawIdeaKeys(idea),
       suggestedRepairDirection,
       issues: validation.issues,
     });
+  }
+
+  if (removed.length > 0) {
     tracer?.addEvent({
       step: "required_workflow_fields_missing",
       status: "ok",
@@ -1492,9 +1673,17 @@ function validateRound1IdeaExtraction(
       provider: provider.name,
       model,
       details: {
-        title: truncateText(idea.title, 140),
-        missingFields,
-        issues: validation.issues,
+        rejectedCount: removed.length,
+        validCount: valid.length,
+        fieldCounts: Object.fromEntries(fieldCounts),
+        fieldNames: [...fieldCounts.keys()],
+        rejectedDrafts: removed.slice(0, 12).map((item) => ({
+          title: truncateText(item.title, 140),
+          missingFields: item.missingFields,
+          invalidFields: item.invalidFields,
+          invalidReasons: item.invalidReasons,
+          rawKeys: item.rawKeys,
+        })),
       },
     });
   }
@@ -1502,24 +1691,311 @@ function validateRound1IdeaExtraction(
   return { valid, removed };
 }
 
-function createRound1RepairDirection(idea: ProductIdeaDraft, missingFields: string[]) {
+function rawIdeaKeys(idea: ProductIdeaDraft) {
+  const rawKeys = (idea as ProductIdeaDraft & { __rawKeys?: string[] })
+    .__rawKeys;
+  return Array.isArray(rawKeys) ? rawKeys : Object.keys(idea).sort();
+}
+
+function getIdeasArrayFromResponse(response: unknown) {
+  if (
+    response &&
+    typeof response === "object" &&
+    Array.isArray((response as { ideas?: unknown }).ideas)
+  ) {
+    return (response as { ideas: unknown[] }).ideas;
+  }
+  if (Array.isArray(response)) {
+    return response;
+  }
+  return [];
+}
+
+function logRound1RawOutputReceived(
+  response: unknown,
+  tracer: RunDebugTracer | undefined,
+  round: RoundRecord | undefined,
+  agent: CouncilAgent,
+  provider: AIProvider,
+  model: string,
+) {
+  const keys =
+    response && typeof response === "object" && !Array.isArray(response)
+      ? Object.keys(response).sort()
+      : [];
+  const ideas = getIdeasArrayFromResponse(response);
+  const firstIdea =
+    ideas[0] && typeof ideas[0] === "object"
+      ? (ideas[0] as Record<string, unknown>)
+      : undefined;
+  const firstIdeaKeys = firstIdea ? Object.keys(firstIdea).sort() : [];
+  const firstIdeaTitle =
+    typeof firstIdea?.title === "string" ? firstIdea.title : "";
+  const snakeCaseFields = [
+    "exact_buyer",
+    "manual_workaround_today",
+    "messy_input",
+    "output_artifact",
+    "painful_moment",
+    "broad_saas_not_enough_reason",
+    "before_after_demo",
+    "source_code_ownership_angle",
+    "initial_search_queries",
+    "build_complexity",
+  ];
+  const camelCaseFields = [
+    "exactBuyer",
+    "manualWorkaroundToday",
+    "messyInput",
+    "outputArtifact",
+    "painfulMoment",
+    "broadSaasNotEnoughReason",
+    "beforeAfterDemo",
+    "sourceCodeOwnershipAngle",
+    "initialSearchQueries",
+    "buildComplexity",
+  ];
+
+  tracer?.addEvent({
+    step: "round1_raw_output_received",
+    status: "ok",
+    round: round?.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: {
+      responseType: Array.isArray(response)
+        ? "array"
+        : response === null
+          ? "null"
+          : typeof response,
+      keys,
+      ideasArrayLength: ideas.length,
+      firstIdeaKeys,
+      firstIdeaTitle: truncateText(firstIdeaTitle, 140),
+      hasSnakeCaseFields: snakeCaseFields.some((field) =>
+        firstIdeaKeys.includes(field),
+      ),
+      hasCamelCaseFields: camelCaseFields.some((field) =>
+        firstIdeaKeys.includes(field),
+      ),
+    },
+  });
+}
+
+function createRound1RepairDirection(
+  idea: ProductIdeaDraft,
+  missingFields: string[],
+) {
   const title = idea.title || "untitled idea";
   const fieldList = missingFields.join(", ");
   return `Repair ${title} by grounding ${fieldList} in a named buyer, their current Slack/email/docs/spreadsheet input, the manual steps they take today, the client event that hurts, and the exact proof/report/pack artifact generated.`;
 }
 
 function renderRound1RepairInput(removed: Round1RemovedIdea[]) {
-  return removed
-    .slice(0, 12)
-    .map((item) => ({
-      title: item.idea.title,
-      exactBuyer: workflowFieldValue(item.idea, "exactBuyer"),
-      missingFields: item.missingFields,
-      invalidValues: Object.fromEntries(
-        REQUIRED_WORKFLOW_FIELDS.map((field) => [field, workflowFieldValue(item.idea, field)]),
-      ),
-      suggestedRepairDirection: item.suggestedRepairDirection,
-    }));
+  return removed.slice(0, 12).map((item) => ({
+    title: item.idea.title,
+    exactBuyer: workflowFieldValue(item.idea, "exactBuyer"),
+    missingFields: item.missingFields,
+    invalidValues: Object.fromEntries(
+      REQUIRED_WORKFLOW_FIELDS.map((field) => [
+        field,
+        workflowFieldValue(item.idea, field),
+      ]),
+    ),
+    suggestedRepairDirection: item.suggestedRepairDirection,
+  }));
+}
+
+async function generateRound1ReplacementIdeas({
+  state,
+  provider,
+  agent,
+  round,
+  tracer,
+  persistence,
+  model,
+}: {
+  state: DebateState;
+  provider: AIProvider;
+  agent: CouncilAgent;
+  round?: RoundRecord;
+  tracer?: RunDebugTracer;
+  persistence?: DebatePersistence;
+  model: string;
+}) {
+  if (!round) {
+    return [];
+  }
+
+  tracer?.addEvent({
+    step: "round1_replacement_attempted",
+    status: "start",
+    round: round.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: { requestedIdeas: 8 },
+  });
+
+  const { response } = await callModelJSON<IdeasResponse>({
+    state,
+    provider,
+    agent,
+    round,
+    tracer,
+    persistence,
+    mode: "idea_generation",
+    buildPrompt: (context) => `
+Round 1 returned no parseable ideas.
+
+Generate exactly 8 fully valid hidden workflow JSON objects from the buyer evidence. Do not repair previous output because there were no parseable drafts.
+
+Hard requirements:
+- No markdown. No prose. JSON only.
+- Return exactly 8 objects in the ideas array.
+- Every object must include title, exactBuyer, manualWorkaroundToday, messyInput, outputArtifact, painfulMoment, broadSaasNotEnoughReason, beforeAfterDemo, sourceCodeOwnershipAngle, initialSearchQueries, and buildComplexity.
+- Use camelCase field names exactly as shown.
+- manualWorkaroundToday must mention a manual tool/process like Slack, email, Google Doc, Notion, spreadsheet, screenshot, call, Loom, or checklist.
+- initialSearchQueries must include at least 4 concrete workflow/artifact/event phrases and no phrases like "They want" or "They need".
+- Reject generic SaaS categories. Titles must be weirdly specific hidden workflow artifacts.
+
+Workflow discovery brief:
+${state.workflowDiscoveryBrief ?? buildWorkflowDiscoveryBrief(state.run, state.marketEvidence)}
+
+Compact council context:
+${context}
+
+Return exactly this JSON shape:
+{
+  "ideas": [
+    {
+      "title": "...",
+      "exactBuyer": "...",
+      "manualWorkaroundToday": "...",
+      "messyInput": "...",
+      "outputArtifact": "...",
+      "painfulMoment": "...",
+      "broadSaasNotEnoughReason": "...",
+      "beforeAfterDemo": "...",
+      "sourceCodeOwnershipAngle": "...",
+      "initialSearchQueries": ["...", "...", "...", "..."],
+      "buildComplexity": "low|medium|high"
+    }
+  ]
+}
+`,
+    fallback: { ideas: [] },
+    expectedSchema: "IdeasResponse",
+    temperature: 0.35,
+    maxTokens: 2600,
+    okDetails: (replacementResponse) => ({
+      replacementIdeasExtracted: Array.isArray(replacementResponse.ideas)
+        ? replacementResponse.ideas.length
+        : 0,
+    }),
+  });
+
+  logRound1RawOutputReceived(response, tracer, round, agent, provider, model);
+  const normalized = normalizeIdeas(response.ideas, {
+    useFallback: false,
+  }).slice(0, 8);
+  const succeeded = normalized.length > 0;
+  tracer?.addEvent({
+    step: succeeded
+      ? "round1_replacement_succeeded"
+      : "round1_replacement_failed",
+    status: succeeded ? "ok" : "failed",
+    round: round.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: { replacementIdeas: normalized.length },
+  });
+  return normalized;
+}
+
+function createDeterministicRound1FallbackIdeas(
+  state: DebateState,
+): ProductIdeaDraft[] {
+  const buyer = state.run.targetBuyer?.trim() || "small service agencies";
+  const seeds = [
+    {
+      title: "Approval Reversal Proof Pack",
+      input:
+        "Slack approval thread, client email change request, screenshot of original signoff",
+      artifact: "client-ready approval reversal proof pack",
+      event:
+        "client claims a changed request was included after approving the original scope",
+    },
+    {
+      title: "Revision Contradiction Log",
+      input: "Figma comments, Loom feedback, and Google Doc revision notes",
+      artifact: "revision contradiction log with evidence snippets",
+      event:
+        "client feedback contradicts an earlier signed revision during a deadline call",
+    },
+    {
+      title: "Client Promise Drift Report",
+      input:
+        "sales call transcript, proposal email, and Notion delivery checklist",
+      artifact: "client promise drift report for scope conversations",
+      event: "a prospect references an old sales promise after project kickoff",
+    },
+    {
+      title: "Handoff Assumption Gap Finder",
+      input: "handoff email, kickoff call notes, and project checklist rows",
+      artifact: "handoff assumption gap report with owner questions",
+      event:
+        "delivery team discovers an unstated assumption after client handoff",
+    },
+    {
+      title: "Screenshot Feedback Conflict Resolver",
+      input: "screenshot markups, Slack replies, and Figma comment threads",
+      artifact: "screenshot feedback conflict resolution packet",
+      event:
+        "client screenshot feedback conflicts with the approved design direction",
+    },
+  ];
+
+  return seeds.map((seed) => ({
+    title: normalizeProductTitle(`${seed.title} for ${buyer}`, buyer),
+    description: `Source-code product that turns ${seed.input} into a ${seed.artifact}.`,
+    targetBuyer: buyer,
+    exactBuyer: buyer,
+    pain: seed.event,
+    whyBuySourceCode:
+      "Buyers can customize evidence rules, templates, and exports for their client process.",
+    sourceCodeOwnershipAngle:
+      "buyers can customize proof rules and templates for their exact client workflow",
+    manualWorkaroundToday: `They paste ${seed.input} into a Google Doc checklist before a client call`,
+    messyInput: seed.input,
+    outputArtifact: seed.artifact,
+    painfulMoment: seed.event,
+    broadSaasNotEnoughReason:
+      "broad project tools store messages but do not assemble evidence for this client event",
+    beforeAfterDemo: `paste ${seed.input}, then generate a ${seed.artifact} with evidence and reply`,
+    initialSearchQueries: normalizeInitialSearchQueries([
+      seed.title,
+      seed.artifact,
+      seed.event,
+      `${seed.input.split(",")[0]} proof pack`,
+      `${seed.title} source code`,
+    ]),
+    buildComplexity: "medium",
+    mvpFeatures: [
+      "Paste messy workflow inputs",
+      "Extract evidence",
+      "Generate client-ready artifact",
+    ],
+    fullFeatures: [],
+    pricingIdea: "$149-$499 source-code license",
+    risks: [
+      "Deterministic fallback candidate; must be validated before build.",
+    ],
+    fallbackGenerated: true,
+    status: "generated" as const,
+  }));
 }
 
 async function repairRound1Ideas({
@@ -1588,13 +2064,12 @@ Hard requirements:
 Compact council context:
 ${context}
 
-Return JSON only:
+No markdown. No prose. JSON only. Return exactly this JSON shape:
 {
   "ideas": [
     {
       "title": "string",
       "exactBuyer": "string",
-      "target_buyer": "string",
       "manualWorkaroundToday": "string",
       "messyInput": "string",
       "outputArtifact": "string",
@@ -1602,9 +2077,8 @@ Return JSON only:
       "broadSaasNotEnoughReason": "string",
       "beforeAfterDemo": "string",
       "sourceCodeOwnershipAngle": "string",
-      "why_buy_source_code": "string",
-      "initialSearchQueries": ["string"],
-      "buildComplexity": "low | medium | high"
+      "initialSearchQueries": ["...", "...", "...", "..."],
+      "buildComplexity": "low|medium|high"
     }
   ]
 }
@@ -1614,7 +2088,9 @@ Return JSON only:
     temperature: 0.25,
     maxTokens: 2200,
     okDetails: (response) => ({
-      repairedIdeasExtracted: Array.isArray(response.ideas) ? response.ideas.length : 0,
+      repairedIdeasExtracted: Array.isArray(response.ideas)
+        ? response.ideas.length
+        : 0,
     }),
   });
 
@@ -1627,7 +2103,14 @@ Return JSON only:
     provider,
     model,
   );
-  const repairValidation = validateRound1IdeaExtraction(repaired, tracer, round, agent, provider, model);
+  const repairValidation = validateRound1IdeaExtraction(
+    repaired,
+    tracer,
+    round,
+    agent,
+    provider,
+    model,
+  );
   const mergedValid = dedupeIdeaCandidates(
     uniqueByTitle([...validIdeas, ...repairValidation.valid]),
     tracer,
@@ -1664,11 +2147,12 @@ async function generateIdeas(
   round?: RoundRecord,
   persistence?: DebatePersistence,
 ) {
-  const fallback = { ideas: expandMockIdeas() };
+  const fallback = { ideas: [] };
   const model = modelForRound(agent, provider, round);
 
   const workflowDiscoveryBrief =
-    state.workflowDiscoveryBrief ?? buildWorkflowDiscoveryBrief(state.run, state.marketEvidence);
+    state.workflowDiscoveryBrief ??
+    buildWorkflowDiscoveryBrief(state.run, state.marketEvidence);
   state.workflowDiscoveryBrief = workflowDiscoveryBrief;
   tracer?.addEvent({
     step: "workflow_discovery_brief_created",
@@ -1755,13 +2239,12 @@ ${workflowDiscoveryBrief}
 Compact council context:
 ${context}
 
-Return JSON only:
+No markdown. No prose. JSON only. Return exactly this JSON shape:
 {
   "ideas": [
     {
       "title": "string",
       "exactBuyer": "string",
-      "target_buyer": "string",
       "manualWorkaroundToday": "string",
       "messyInput": "string",
       "outputArtifact": "string",
@@ -1769,9 +2252,8 @@ Return JSON only:
       "broadSaasNotEnoughReason": "string",
       "beforeAfterDemo": "string",
       "sourceCodeOwnershipAngle": "string",
-      "why_buy_source_code": "string",
-      "initialSearchQueries": ["string"],
-      "buildComplexity": "low | medium | high"
+      "initialSearchQueries": ["...", "...", "...", "..."],
+      "buildComplexity": "low|medium|high"
     }
   ]
 }
@@ -1781,21 +2263,75 @@ Return JSON only:
       temperature: 0.55,
       maxTokens: 2800,
       okDetails: (response) => ({
-        ideasExtracted: Array.isArray(response.ideas) ? response.ideas.length : 0,
+        ideasExtracted: Array.isArray(response.ideas)
+          ? response.ideas.length
+          : 0,
       }),
     });
 
-    const normalized = normalizeIdeas(response.ideas).slice(0, 12);
-    const rewritten = applyIdeaQualityRewrites(normalized, state, tracer, round, agent, provider, model);
+    logRound1RawOutputReceived(response, tracer, round, agent, provider, model);
+    const rawIdeaCount = Array.isArray(response.ideas)
+      ? response.ideas.length
+      : 0;
+    state.round1RawIdeaCount = rawIdeaCount;
+    let normalized = normalizeIdeas(response.ideas, {
+      useFallback: false,
+    }).slice(0, 12);
+
+    if (normalized.length === 0) {
+      normalized = await generateRound1ReplacementIdeas({
+        state,
+        provider,
+        agent,
+        round,
+        tracer,
+        persistence,
+        model,
+      });
+    }
+
+    let usedDeterministicFallback = false;
+    if (rawIdeaCount === 0 && normalized.length === 0) {
+      normalized = createDeterministicRound1FallbackIdeas(state);
+      usedDeterministicFallback = true;
+      tracer?.addEvent({
+        step: "round1_deterministic_fallback_created",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model,
+        details: { fallbackIdeas: normalized.length },
+      });
+    }
+
+    const rewritten = applyIdeaQualityRewrites(
+      normalized,
+      state,
+      tracer,
+      round,
+      agent,
+      provider,
+      model,
+    );
     const deduped = dedupeIdeaCandidates(
       rewritten,
       tracer,
       round,
       agent,
       provider.name,
-      "initial_generation",
+      usedDeterministicFallback
+        ? "round1_deterministic_fallback"
+        : "initial_generation",
     ).ideas;
-    const initialValidation = validateRound1IdeaExtraction(deduped, tracer, round, agent, provider, model);
+    const initialValidation = validateRound1IdeaExtraction(
+      deduped,
+      tracer,
+      round,
+      agent,
+      provider,
+      model,
+    );
     const repaired = await repairRound1Ideas({
       state,
       provider,
@@ -1867,7 +2403,7 @@ Skeptic Agent requirements:
 Compact council context:
 ${context}
 
-Return JSON only:
+No markdown. No prose. JSON only. Return exactly this JSON shape:
 {
   "topIdeas": [
     {"title": "string", "reason": "string", "requiredFix": "string"}
@@ -1882,8 +2418,12 @@ Return JSON only:
       temperature: 0.25,
       maxTokens: 2600,
       okDetails: (response) => ({
-        topIdeas: Array.isArray(response.topIdeas) ? response.topIdeas.length : 0,
-        rejectedIdeas: Array.isArray(response.rejectedIdeas) ? response.rejectedIdeas.length : 0,
+        topIdeas: Array.isArray(response.topIdeas)
+          ? response.topIdeas.length
+          : 0,
+        rejectedIdeas: Array.isArray(response.rejectedIdeas)
+          ? response.rejectedIdeas.length
+          : 0,
       }),
     });
 
@@ -1923,7 +2463,8 @@ async function confirmShortlist(
     topIdeas: state.shortlist.map((idea) => ({
       title: idea.title,
       reason: "Strongest fit after rejection pass.",
-      requiredFix: "Keep the MVP narrow and make the source-code package obvious in the demo.",
+      requiredFix:
+        "Keep the MVP narrow and make the source-code package obvious in the demo.",
     })),
   };
 
@@ -1955,7 +2496,7 @@ Builder shortlist requirements:
 Compact council context:
 ${context}
 
-Return JSON only:
+No markdown. No prose. JSON only. Return exactly this JSON shape:
 {
   "message": "string",
   "topIdeas": [
@@ -1968,7 +2509,9 @@ Return JSON only:
       temperature: 0.25,
       maxTokens: 2200,
       okDetails: (response) => ({
-        topIdeas: Array.isArray(response.topIdeas) ? response.topIdeas.length : 0,
+        topIdeas: Array.isArray(response.topIdeas)
+          ? response.topIdeas.length
+          : 0,
       }),
     }));
   } catch (error) {
@@ -1994,7 +2537,9 @@ Return JSON only:
   return {
     message: safeText(response.message, fallback.message),
     topIdeas: state.shortlist.map((idea, index) => {
-      const match = response.topIdeas?.find((item) => item.title === idea.title);
+      const match = response.topIdeas?.find(
+        (item) => item.title === idea.title,
+      );
       return {
         title: idea.title,
         reason: safeText(match?.reason, fallback.topIdeas[index]?.reason ?? ""),
@@ -2006,7 +2551,6 @@ Return JSON only:
     }),
   };
 }
-
 
 async function runMarketSearchRound(
   state: DebateState,
@@ -2099,14 +2643,27 @@ async function runMarketSearchRound(
   }
 
   state.toolExistenceChecks = checks;
-  const marketSearchEvidence = marketChecksAsEvidenceDrafts(checks).map((item) => ({
-    ...item,
-    productIdeaId: state.shortlist.find((idea) => idea.title === item.title.replace("Market Search Reality Check: ", ""))?.id ?? null,
-  }));
+  const marketSearchEvidence = marketChecksAsEvidenceDrafts(checks).map(
+    (item) => ({
+      ...item,
+      productIdeaId:
+        state.shortlist.find(
+          (idea) =>
+            idea.title ===
+            item.title.replace("Market Search Reality Check: ", ""),
+        )?.id ?? null,
+    }),
+  );
   const savedMarketSearchEvidence =
-    (await persistence?.saveMarketEvidence?.(marketSearchEvidence)) ?? marketSearchEvidence;
-  state.marketEvidence = [...state.marketEvidence, ...savedMarketSearchEvidence];
-  state.marketSearchStatus = checks.some((check) => check.marketSearchStatus === "failed")
+    (await persistence?.saveMarketEvidence?.(marketSearchEvidence)) ??
+    marketSearchEvidence;
+  state.marketEvidence = [
+    ...state.marketEvidence,
+    ...savedMarketSearchEvidence,
+  ];
+  state.marketSearchStatus = checks.some(
+    (check) => check.marketSearchStatus === "failed",
+  )
     ? "failed"
     : "completed";
   tracer?.addEvent({
@@ -2115,7 +2672,10 @@ async function runMarketSearchRound(
     round: round.title,
     agent: marketAgent.name,
     provider: provider.name,
-    details: { status: state.marketSearchStatus, checks: checks.map(summarizeToolExistenceCheck) },
+    details: {
+      status: state.marketSearchStatus,
+      checks: checks.map(summarizeToolExistenceCheck),
+    },
   });
 
   await recordMessage(
@@ -2144,7 +2704,8 @@ async function applyPostMarketSearchGate(
     marketGapPasses(findExistenceCheck(state, idea.title)),
   );
   const initialRejected = originalShortlist.filter(
-    (idea) => !initialEligible.some((eligible) => eligible.title === idea.title),
+    (idea) =>
+      !initialEligible.some((eligible) => eligible.title === idea.title),
   );
 
   const provider = createMarketSearchProvider();
@@ -2158,7 +2719,10 @@ async function applyPostMarketSearchGate(
       continue;
     }
 
-    const narrowed = deterministicNicheDownIdea(idea, state.run.targetBuyer ?? "");
+    const narrowed = deterministicNicheDownIdea(
+      idea,
+      state.run.targetBuyer ?? "",
+    );
     tracer?.addEvent({
       step: "niche_down_attempted",
       status: "ok",
@@ -2184,16 +2748,20 @@ async function applyPostMarketSearchGate(
       details: { title: truncateText(narrowed.title, 140) },
     });
 
-    const narrowedCheck = await runMarketExistenceCheck(narrowed, provider, (event) => {
-      tracer?.addEvent({
-        step: event.step,
-        status: "ok",
-        round: round.title,
-        agent: marketAgent.name,
-        provider: provider.name,
-        details: event.details,
-      });
-    });
+    const narrowedCheck = await runMarketExistenceCheck(
+      narrowed,
+      provider,
+      (event) => {
+        tracer?.addEvent({
+          step: event.step,
+          status: "ok",
+          round: round.title,
+          agent: marketAgent.name,
+          provider: provider.name,
+          details: event.details,
+        });
+      },
+    );
     state.toolExistenceChecks.push(narrowedCheck);
 
     tracer?.addEvent({
@@ -2238,7 +2806,9 @@ async function applyPostMarketSearchGate(
       rejectedIdeaCount: rejectedIdeas.length,
       rejectedIdeas: rejectedIdeas.map((idea) => ({
         title: idea.title,
-        existenceCheck: summarizeToolExistenceCheck(findExistenceCheck(state, idea.title)),
+        existenceCheck: summarizeToolExistenceCheck(
+          findExistenceCheck(state, idea.title),
+        ),
       })),
     },
   });
@@ -2288,10 +2858,7 @@ async function applyPostMarketSearchGate(
     return { decision: "continue" };
   }
 
-  const scoredIdeas = createMarketGateRejectedScores(
-    originalShortlist,
-    state,
-  );
+  const scoredIdeas = createMarketGateRejectedScores(originalShortlist, state);
   state.scoreHistory = scoredIdeas.map((idea) => ({
     title: idea.title,
     totalScore: idea.score.total_score,
@@ -2321,7 +2888,6 @@ async function applyPostMarketSearchGate(
   return { decision: "reject_all", scoredIdeas };
 }
 
-
 async function finishRejectAllAfterKillSwitch({
   state,
   provider,
@@ -2340,17 +2906,29 @@ async function finishRejectAllAfterKillSwitch({
   tracer?: RunDebugTracer;
 }): Promise<DebateArtifacts> {
   state.finalDecision = "reject_all";
-  state.finalDecisionReason = "Round 1 failed to produce valid hidden workflow objects.";
+  state.finalDecisionReason =
+    (state.round1RawIdeaCount ?? 0) === 0
+      ? "Round 1 model returned no parseable ideas."
+      : "Round 1 returned ideas, but none passed required hidden-workflow fields.";
   state.shortlist = [];
   state.toolExistenceChecks = [];
   state.marketSearchStatus = "completed";
 
-  const removedWorkflowIdeas = buildKillSwitchRemovedIdeaRows(state, killSwitchResult);
-  const placeholderWinner = createKillSwitchPlaceholderWinner(state, removedWorkflowIdeas[0]?.title);
+  const removedWorkflowIdeas = buildKillSwitchRemovedIdeaRows(
+    state,
+    killSwitchResult,
+  );
+  const placeholderWinner = createKillSwitchPlaceholderWinner(
+    state,
+    removedWorkflowIdeas[0]?.title,
+  );
   const scoredIdeas: ScoredProductIdea[] = [];
 
   await persistence?.updateIdeaStatuses(
-    [...killSwitchResult.originalIdeas, ...(state.round1ExtractionRemoved ?? []).map((item) => item.idea)].map((idea) => ({
+    [
+      ...killSwitchResult.originalIdeas,
+      ...(state.round1ExtractionRemoved ?? []).map((item) => item.idea),
+    ].map((idea) => ({
       id: idea.id,
       title: idea.title,
       status: "rejected",
@@ -2429,14 +3007,20 @@ async function finishRejectAllAfterKillSwitch({
   };
 }
 
-function buildKillSwitchRemovedIdeaRows(state: DebateState, killSwitchResult: KillSwitchResult) {
+function buildKillSwitchRemovedIdeaRows(
+  state: DebateState,
+  killSwitchResult: KillSwitchResult,
+) {
   const round1Removed = state.round1ExtractionRemoved ?? [];
-  const byTitle = new Map<string, {
-    title: string;
-    reason: string;
-    missingFields?: string[];
-    suggestedRepairDirection?: string;
-  }>();
+  const byTitle = new Map<
+    string,
+    {
+      title: string;
+      reason: string;
+      missingFields?: string[];
+      suggestedRepairDirection?: string;
+    }
+  >();
 
   for (const item of round1Removed) {
     byTitle.set(item.idea.title, {
@@ -2454,21 +3038,29 @@ function buildKillSwitchRemovedIdeaRows(state: DebateState, killSwitchResult: Ki
       title: item.idea.title,
       reason: item.reason,
       missingFields: validation.missingFields,
-      suggestedRepairDirection: createRound1RepairDirection(item.idea, validation.missingFields),
+      suggestedRepairDirection: createRound1RepairDirection(
+        item.idea,
+        validation.missingFields,
+      ),
     });
   }
 
   return [...byTitle.values()];
 }
 
-function createKillSwitchPlaceholderWinner(state: DebateState, title?: string): ScoredProductIdea {
+function createKillSwitchPlaceholderWinner(
+  state: DebateState,
+  title?: string,
+): ScoredProductIdea {
   const score = normalizeScore({ total_score: 0 });
   return {
     title: title ?? "No Valid Hidden Workflow Object",
-    description: "Placeholder only; no idea survived Round 1 hidden-workflow validation.",
+    description:
+      "Placeholder only; no idea survived Round 1 hidden-workflow validation.",
     targetBuyer: state.run.targetBuyer ?? "Unknown buyer",
     pain: "Round 1 did not provide enough structured workflow detail to score.",
-    whyBuySourceCode: "Not evaluated because the pipeline stopped before scoring.",
+    whyBuySourceCode:
+      "Not evaluated because the pipeline stopped before scoring.",
     mvpFeatures: [],
     fullFeatures: [],
     pricingIdea: "Not evaluated",
@@ -2574,9 +3166,9 @@ async function finishRejectAllAfterMarketGate({
 function marketGapPasses(check?: ToolExistenceCheck) {
   return Boolean(
     check &&
-      check.marketSearchStatus === "completed" &&
-      check.actualToolGapScore >= 7 &&
-      check.sourceCodeGapScore >= 7,
+    check.marketSearchStatus === "completed" &&
+    check.actualToolGapScore >= 7 &&
+    check.sourceCodeGapScore >= 7,
   );
 }
 
@@ -2614,10 +3206,9 @@ function createMarketGateRejectedScores(
     const titleQualityBad =
       hasBadProductTitleQuality(idea.title, idea.targetBuyer) ||
       idea.genericRiskReason === "title stuffed with broad buyer list";
-    const hiddenWorkflowSpecificity =
-      titleQualityBad
-        ? Math.min(localScore.hidden_workflow_specificity, 5)
-        : check?.commonCategoryRisk === "high"
+    const hiddenWorkflowSpecificity = titleQualityBad
+      ? Math.min(localScore.hidden_workflow_specificity, 5)
+      : check?.commonCategoryRisk === "high"
         ? Math.min(localScore.hidden_workflow_specificity, 5)
         : localScore.hidden_workflow_specificity;
     const score = normalizeScore({
@@ -2635,10 +3226,9 @@ function createMarketGateRejectedScores(
       ...localExplanations[index],
       actual_tool_gap: `Failed the post-market-search gate. ${marketGateRejectedReason(check)}`,
       source_code_gap: `Failed the source-code-kit gate. ${marketGateRejectedReason(check)}`,
-      hidden_workflow_specificity:
-        titleQualityBad
-          ? "Title was stuffed with a broad buyer list, so hidden workflow specificity is capped until the title is narrowed."
-          : check?.commonCategoryRisk === "high"
+      hidden_workflow_specificity: titleQualityBad
+        ? "Title was stuffed with a broad buyer list, so hidden workflow specificity is capped until the title is narrowed."
+        : check?.commonCategoryRisk === "high"
           ? "Searched evidence shows a crowded/common category, so this is not specific enough to continue."
           : localExplanations[index]?.hidden_workflow_specificity,
     });
@@ -2716,7 +3306,9 @@ async function runInteractiveDebateRound(
   });
 
   for (const message of messages) {
-    const agent = agents.find((item) => item.key === message.agentKey) ?? agentByKey(message.agentKey);
+    const agent =
+      agents.find((item) => item.key === message.agentKey) ??
+      agentByKey(message.agentKey);
     tracer?.addEvent({
       step: "interactive_debate_turn",
       status: "ok",
@@ -2751,7 +3343,10 @@ async function scoreShortlist(
   round?: RoundRecord,
   persistence?: DebatePersistence,
 ) {
-  const localScores = scoreIdeasLocally(state.shortlist, state.marketEvidence).map((score, index) =>
+  const localScores = scoreIdeasLocally(
+    state.shortlist,
+    state.marketEvidence,
+  ).map((score, index) =>
     applyMarketGapRules(
       state.shortlist[index],
       score,
@@ -2806,7 +3401,7 @@ Rubric keys:
 Compact council context:
 ${context}
 
-Return JSON only:
+No markdown. No prose. JSON only. Return exactly this JSON shape:
 {
   "scores": [
     {
@@ -2889,7 +3484,10 @@ Return JSON only:
       modelScore,
       findExistenceCheck(state, idea.title),
     );
-    if (score.actual_tool_gap !== modelScore.actual_tool_gap || score.source_code_gap !== modelScore.source_code_gap) {
+    if (
+      score.actual_tool_gap !== modelScore.actual_tool_gap ||
+      score.source_code_gap !== modelScore.source_code_gap
+    ) {
       tracer?.addEvent({
         step: "gap_score_adjusted",
         status: "ok",
@@ -2903,7 +3501,9 @@ Return JSON only:
           adjustedActualToolGap: score.actual_tool_gap,
           modelSourceCodeGap: modelScore.source_code_gap,
           adjustedSourceCodeGap: score.source_code_gap,
-          existenceCheck: summarizeToolExistenceCheck(findExistenceCheck(state, idea.title)),
+          existenceCheck: summarizeToolExistenceCheck(
+            findExistenceCheck(state, idea.title),
+          ),
         },
       });
     }
@@ -2930,7 +3530,8 @@ Return JSON only:
     totalScore: idea.score.total_score,
     score: idea.score,
     explanations:
-      idea.scoreExplanations ?? normalizeScoreExplanations(localExplanations[0]),
+      idea.scoreExplanations ??
+      normalizeScoreExplanations(localExplanations[0]),
     reason: idea.scoreReason ?? "",
   }));
 
@@ -2952,11 +3553,13 @@ async function chooseWinner(
   const fallback = {
     finalDecision: thresholdDecision,
     winnerTitle: thresholdDecision === "build_now" ? topCandidate.title : null,
-    candidateTitle: thresholdDecision === "reject_all" ? null : topCandidate.title,
+    candidateTitle:
+      thresholdDecision === "reject_all" ? null : topCandidate.title,
     reason: defaultJudgeReason(topCandidate, thresholdDecision),
     whyOthersLost: sorted.slice(1).map((idea) => ({
       title: idea.title,
-      reason: "Lower Day-One Sale Probability after scoring and council criticism.",
+      reason:
+        "Lower Day-One Sale Probability after scoring and council criticism.",
     })),
   };
   const model = modelForRound(agent, provider, round);
@@ -2992,15 +3595,19 @@ Compact council context:
 ${context}
 
 Scored ideas:
-${JSON.stringify(sorted.map((idea) => ({
-  title: idea.title,
-  totalScore: idea.score.total_score,
-  score: idea.score,
-  scoreReason: idea.scoreReason,
-  explanations: idea.scoreExplanations,
-})), null, 2)}
+${JSON.stringify(
+  sorted.map((idea) => ({
+    title: idea.title,
+    totalScore: idea.score.total_score,
+    score: idea.score,
+    scoreReason: idea.scoreReason,
+    explanations: idea.scoreExplanations,
+  })),
+  null,
+  2,
+)}
 
-Return JSON only:
+No markdown. No prose. JSON only. Return exactly this JSON shape:
 {
   "finalDecision": "build_now",
   "winnerTitle": "string or null",
@@ -3079,7 +3686,8 @@ Return JSON only:
       details: {
         whyOthersLostType: typeof response.whyOthersLost,
         whyOthersLostIsArray: Array.isArray(response.whyOthersLost),
-        preSellPackType: typeof (response as { preSellPack?: unknown }).preSellPack,
+        preSellPackType: typeof (response as { preSellPack?: unknown })
+          .preSellPack,
       },
     });
   }
@@ -3127,7 +3735,9 @@ Return JSON only:
 
 function inferFinalDecision(scores: ScoredProductIdea[]): FinalDecision {
   const eligibleIdeas = scores.filter((idea) => isGapEligible(idea.score));
-  const buildableIdeas = eligibleIdeas.filter((idea) => isBuildReady(idea.score));
+  const buildableIdeas = eligibleIdeas.filter((idea) =>
+    isBuildReady(idea.score),
+  );
 
   if (buildableIdeas.length > 0) {
     return "build_now";
@@ -3192,7 +3802,9 @@ function enforceMarketFinalDecision(
     return "build_now";
   }
 
-  const fallbackDecision = isGapEligible(candidate.score) ? "validate_first" : "reject_all";
+  const fallbackDecision = isGapEligible(candidate.score)
+    ? "validate_first"
+    : "reject_all";
   tracer?.addEvent({
     step: "build_now_blocked_by_market_search",
     status: "ok",
@@ -3210,7 +3822,10 @@ function enforceMarketFinalDecision(
   return fallbackDecision;
 }
 
-function defaultJudgeReason(candidate: ScoredProductIdea, decision: FinalDecision) {
+function defaultJudgeReason(
+  candidate: ScoredProductIdea,
+  decision: FinalDecision,
+) {
   if (decision === "build_now") {
     return `${candidate.title} clears ${DAY_ONE_BUILD_THRESHOLD}/100 Day-One Sale Probability. Build now: this is the strongest fast-sale signal in the shortlist.`;
   }
@@ -3227,7 +3842,10 @@ function enforceDecisionReason(
   candidate: ScoredProductIdea,
   decision: FinalDecision,
 ) {
-  if (decision === "validate_first" && !/Validate first \/ Do not build yet/i.test(reason)) {
+  if (
+    decision === "validate_first" &&
+    !/Validate first \/ Do not build yet/i.test(reason)
+  ) {
     return `Validate first / Do not build yet. ${reason}`;
   }
 
@@ -3237,7 +3855,9 @@ function enforceDecisionReason(
 
   if (
     decision === "reject_all" &&
-    !/Reject all\. Generate better hidden-gap ideas or add stronger market evidence\./i.test(reason)
+    !/Reject all\. Generate better hidden-gap ideas or add stronger market evidence\./i.test(
+      reason,
+    )
   ) {
     return `Reject all. Generate better hidden-gap ideas or add stronger market evidence. ${reason || defaultJudgeReason(candidate, decision)}`;
   }
@@ -3264,7 +3884,9 @@ function formatFailedHardGates(candidate: ScoredProductIdea) {
       : null,
   ].filter(Boolean);
 
-  return failed.length ? failed.join(", ") : "it did not clear the full build-now threshold";
+  return failed.length
+    ? failed.join(", ")
+    : "it did not clear the full build-now threshold";
 }
 
 async function generateReport(
@@ -3313,17 +3935,21 @@ Goal:
 ${state.run.goal}
 
 Top candidate:
-${JSON.stringify({
-  title: winner.title,
-  targetBuyer: winner.targetBuyer,
-  pain: winner.pain,
-  whyBuySourceCode: winner.whyBuySourceCode,
-  mvpFeatures: winner.mvpFeatures,
-  fullFeatures: winner.fullFeatures.slice(0, 5),
-  risks: winner.risks.slice(0, 5),
-  score: winner.score,
-  scoreExplanations: winner.scoreExplanations,
-}, null, 2)}
+${JSON.stringify(
+  {
+    title: winner.title,
+    targetBuyer: winner.targetBuyer,
+    pain: winner.pain,
+    whyBuySourceCode: winner.whyBuySourceCode,
+    mvpFeatures: winner.mvpFeatures,
+    fullFeatures: winner.fullFeatures.slice(0, 5),
+    risks: winner.risks.slice(0, 5),
+    score: winner.score,
+    scoreExplanations: winner.scoreExplanations,
+  },
+  null,
+  2,
+)}
 
 Compact council context:
 ${context}
@@ -3352,7 +3978,9 @@ Rules:
       maxTokens: 6500,
       okDetails: (response) => ({
         reportMarkdownLength:
-          typeof response.reportMarkdown === "string" ? response.reportMarkdown.length : 0,
+          typeof response.reportMarkdown === "string"
+            ? response.reportMarkdown.length
+            : 0,
       }),
     }));
   } catch (error) {
@@ -3381,11 +4009,15 @@ Rules:
     linkedinPost: ensureString(response.linkedinPost),
     dmScript: ensureString(response.dmScript),
     demoVideoScript: ensureString(response.demoVideoScript),
-    buildPlan: normalizeBuildPlan((response as { buildPlan?: unknown }).buildPlan),
+    buildPlan: normalizeBuildPlan(
+      (response as { buildPlan?: unknown }).buildPlan,
+    ),
     packagingChecklist: ensureArray<string>(response.packagingChecklist),
     codexBuildBlueprint: ensureString(response.codexBuildBlueprint),
     codexPrompt: ensureString(response.codexPrompt),
-    preSellPack: normalizePreSellPack((response as { preSellPack?: unknown }).preSellPack),
+    preSellPack: normalizePreSellPack(
+      (response as { preSellPack?: unknown }).preSellPack,
+    ),
   };
 
   const reportMarkdown = response.reportMarkdown ?? "";
@@ -3413,12 +4045,17 @@ Rules:
     packagingChecklist: response.packagingChecklist?.length
       ? response.packagingChecklist
       : fallback.packagingChecklist,
-    buildPlan: response.buildPlan?.length ? response.buildPlan : fallback.buildPlan,
+    buildPlan: response.buildPlan?.length
+      ? response.buildPlan
+      : fallback.buildPlan,
     preSellPack: response.preSellPack ?? fallback.preSellPack,
   };
 }
 
-function hasRequiredDecisionPhrase(reportMarkdown: string, decision: FinalDecision) {
+function hasRequiredDecisionPhrase(
+  reportMarkdown: string,
+  decision: FinalDecision,
+) {
   if (decision === "build_now") {
     return /build this first/i.test(reportMarkdown);
   }
@@ -3542,7 +4179,10 @@ function summarizeMessagesForPrompt(messages: CouncilMessage[], limit: number) {
   }));
 }
 
-function summarizeEvidenceForPrompt(evidence: MarketEvidenceDraft[], limit: number) {
+function summarizeEvidenceForPrompt(
+  evidence: MarketEvidenceDraft[],
+  limit: number,
+) {
   return [...evidence]
     .sort((a, b) => b.strengthScore - a.strengthScore)
     .slice(0, limit)
@@ -3585,7 +4225,10 @@ function buildCompactDebateContext(
         ? 5
         : 5);
   const maxText = options.maxText ?? (options.aggressive ? 2200 : 4200);
-  const goalSummary = truncateText(state.run.goal, options.aggressive ? 500 : 900);
+  const goalSummary = truncateText(
+    state.run.goal,
+    options.aggressive ? 500 : 900,
+  );
   const constraints = {
     targetBuyer: state.run.targetBuyer,
     productCategory: state.run.productCategory,
@@ -3596,12 +4239,19 @@ function buildCompactDebateContext(
     notes: truncateText(state.run.notes ?? "", 420),
   };
   const sourceIdeas =
-    options.mode === "skeptic_filter" ? state.ideas : state.shortlist.length ? state.shortlist : state.ideas;
+    options.mode === "skeptic_filter"
+      ? state.ideas
+      : state.shortlist.length
+        ? state.shortlist
+        : state.ideas;
   const compact = {
     goalSummary,
     constraints,
     evidenceStatus: summarizeMarketEvidence(state.marketEvidence),
-    evidenceSummary: summarizeEvidenceForPrompt(state.marketEvidence, maxEvidence),
+    evidenceSummary: summarizeEvidenceForPrompt(
+      state.marketEvidence,
+      maxEvidence,
+    ),
     generatedIdeas:
       options.mode === "skeptic_filter"
         ? summarizeIdeasForPrompt(state.ideas, maxIdeas)
@@ -3613,10 +4263,12 @@ function buildCompactDebateContext(
     rejectedIdeas:
       options.mode === "idea_generation"
         ? undefined
-        : state.rejectedIdeas.slice(0, options.aggressive ? 3 : 6).map((idea) => ({
-            title: idea.title,
-            reason: truncateText(idea.reason, 180),
-          })),
+        : state.rejectedIdeas
+            .slice(0, options.aggressive ? 3 : 6)
+            .map((idea) => ({
+              title: idea.title,
+              reason: truncateText(idea.reason, 180),
+            })),
     criticisms:
       options.mode === "idea_generation" || options.mode === "skeptic_filter"
         ? undefined
@@ -3629,11 +4281,13 @@ function buildCompactDebateContext(
     refinements:
       options.mode === "idea_generation" || options.mode === "skeptic_filter"
         ? undefined
-        : state.refinements.slice(options.aggressive ? -6 : -12).map((item) => ({
-            agent: item.agentName,
-            title: item.title,
-            refinement: truncateText(item.refinement, 220),
-          })),
+        : state.refinements
+            .slice(options.aggressive ? -6 : -12)
+            .map((item) => ({
+              agent: item.agentName,
+              title: item.title,
+              refinement: truncateText(item.refinement, 220),
+            })),
     recentMessages: summarizeMessagesForPrompt(state.messages, maxMessages),
     marketSearchStatus: state.marketSearchStatus,
     toolExistenceChecks: summarizeExistenceChecksForPrompt(
@@ -3658,7 +4312,8 @@ function buildCompactDebateContext(
   }
 
   const includedIdeas =
-    (compact.generatedIdeas?.length ?? 0) + (compact.shortlistedIdeas?.length ?? 0);
+    (compact.generatedIdeas?.length ?? 0) +
+    (compact.shortlistedIdeas?.length ?? 0);
   const consideredIdeas =
     options.mode === "skeptic_filter"
       ? state.ideas.length
@@ -3676,13 +4331,15 @@ function createReportContext(
   scoredIdeas: ScoredProductIdea[],
 ): ReportContext {
   return {
-    previousMessages: summarizeMessagesForPrompt(state.messages, 6).map((message, index) => ({
-      roundNumber: index + 1,
-      roundTitle: message.round,
-      agentName: message.agent,
-      agentRole: message.role,
-      content: message.summary,
-    })),
+    previousMessages: summarizeMessagesForPrompt(state.messages, 6).map(
+      (message, index) => ({
+        roundNumber: index + 1,
+        roundTitle: message.round,
+        agentName: message.agent,
+        agentRole: message.role,
+        content: message.summary,
+      }),
+    ),
     shortlistedIdeas: state.shortlist.map((idea) => ({
       ...idea,
       description: truncateText(idea.description, 220),
@@ -3723,7 +4380,8 @@ function createReportContext(
 function buildTopIdeasFallback(ideas: ProductIdeaDraft[]): TopIdeasResponse {
   const topIdeas = ideas.slice(0, 5).map((idea) => ({
     title: idea.title,
-    reason: "Strong balance of source-code resale value, build speed, and demo clarity.",
+    reason:
+      "Strong balance of source-code resale value, build speed, and demo clarity.",
     requiredFix:
       "Narrow the MVP to one buyer workflow and make the code package visible in the launch demo.",
   }));
@@ -3747,13 +4405,19 @@ function normalizeTopIdeasResponse(
 ): TopIdeasResponse {
   const fallback = buildTopIdeasFallback(ideas);
   const knownTitles = new Set(ideas.map((idea) => idea.title));
-  const topIdeas: Array<{ title: string; reason: string; requiredFix: string }> =
-    uniqueByTitle(response.topIdeas ?? [])
+  const topIdeas: Array<{
+    title: string;
+    reason: string;
+    requiredFix: string;
+  }> = uniqueByTitle(response.topIdeas ?? [])
     .filter((idea) => knownTitles.has(idea.title))
     .slice(0, 5)
     .map((idea) => ({
       title: idea.title,
-      reason: safeText(idea.reason, "Strongest product-market fit in this run."),
+      reason: safeText(
+        idea.reason,
+        "Strongest product-market fit in this run.",
+      ),
       requiredFix: safeText(
         idea.requiredFix,
         "Keep the MVP narrow and show the source-code package clearly.",
@@ -3782,7 +4446,9 @@ function normalizeTopIdeasResponse(
     .filter((idea) => !topTitles.has(idea.title))
     .slice(0, 6)
     .map((idea) => {
-      const match = response.rejectedIdeas?.find((rejected) => rejected.title === idea.title);
+      const match = response.rejectedIdeas?.find(
+        (rejected) => rejected.title === idea.title,
+      );
       return {
         title: idea.title,
         reason: safeText(
@@ -3817,7 +4483,9 @@ function renderGeneratedIdeasMessage(ideas: ProductIdeaDraft[]) {
     `Generated ${ideas.length} complete source-code product candidates.`,
     "I am prioritizing products developers, agencies, freelancers, and founders can buy as code ownership, not as another subscription.",
     "Early strongest source-code resale patterns:",
-    ...ideas.slice(0, 5).map((idea) => `- ${idea.title}: ${idea.whyBuySourceCode}`),
+    ...ideas
+      .slice(0, 5)
+      .map((idea) => `- ${idea.title}: ${idea.whyBuySourceCode}`),
   ].join("\n");
 }
 
@@ -3827,13 +4495,17 @@ function renderSkepticFilterMessage(response: TopIdeasResponse) {
     "",
     "Top 5 kept:",
     ...response.topIdeas.map(
-      (idea) => `- ${idea.title}: ${idea.reason} Fix before scoring: ${idea.requiredFix}`,
+      (idea) =>
+        `- ${idea.title}: ${idea.reason} Fix before scoring: ${idea.requiredFix}`,
     ),
     "",
     "Rejected:",
     ...response.rejectedIdeas
       .slice(0, 10)
-      .map((idea) => `- ${idea.title}: ${idea.reason} Risks: ${idea.risks.join("; ")}`),
+      .map(
+        (idea) =>
+          `- ${idea.title}: ${idea.reason} Risks: ${idea.risks.join("; ")}`,
+      ),
   ].join("\n");
 }
 
@@ -3888,77 +4560,201 @@ function renderJudgeMessage(
   ].join("\n");
 }
 
-function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft[] {
+function normalizeIdeas(
+  ideas: ProductIdeaDraft[] | undefined,
+  options: { useFallback?: boolean } = {},
+): ProductIdeaDraft[] {
   const fallback = expandMockIdeas();
   const source: ProductIdeaDraft[] =
-    Array.isArray(ideas) && ideas.length ? ideas : fallback;
+    Array.isArray(ideas) && ideas.length
+      ? ideas
+      : options.useFallback === false
+        ? []
+        : fallback;
 
   return source.map((idea, index) => {
     const raw = idea as ProductIdeaDraft & {
+      buyer?: string;
       target_buyer?: string;
+      exact_buyer?: string;
       one_sentence?: string;
       why_buy_source_code?: string;
+      demo?: string;
       demo_hook?: string;
       build_complexity?: string;
       buildComplexity?: string;
+      complexity?: string;
       exactBuyer?: string;
       sourceCodeOwnershipAngle?: string;
+      source_code_ownership_angle?: string;
+      source_code_angle?: string;
+      resale_angle?: string;
       manualWorkaroundToday?: string;
+      manual_workaround_today?: string;
+      manual_workaround?: string;
+      workaround?: string;
       messyInput?: string;
+      messy_input?: string;
+      input?: string;
+      messy_inputs?: string;
       outputArtifact?: string;
+      output_artifact?: string;
+      artifact?: string;
+      useful_output?: string;
       painfulMoment?: string;
+      painful_moment?: string;
+      pain_point?: string;
+      painful_event?: string;
       broadSaasNotEnoughReason?: string;
+      broad_saas_not_enough_reason?: string;
+      why_broad_saas_not_enough?: string;
+      why_existing_tools_fail?: string;
       beforeAfterDemo?: string;
+      before_after_demo?: string;
       initialSearchQueries?: string[];
+      initial_search_queries?: string[];
+      search_queries?: string[];
+      exa_queries?: string[];
+      fallbackGenerated?: boolean;
     };
-
-    return {
-    id: idea.id,
-    title: safeText(idea.title, fallback[index]?.title ?? `Product Idea ${index + 1}`),
-    description: safeText(
-      idea.description ?? raw.one_sentence,
-      fallback[index]?.description ?? "A practical full-source-code product.",
-    ),
-    exactBuyer: safeText((idea as ProductIdeaDraft).exactBuyer ?? raw.exactBuyer ?? idea.targetBuyer ?? raw.target_buyer, "Agencies and technical founders"),
-    targetBuyer: safeText(idea.targetBuyer ?? raw.target_buyer ?? raw.exactBuyer, "Agencies and technical founders"),
-    pain: safeText(idea.pain, raw.one_sentence ?? "The buyer wants to save implementation time."),
-    sourceCodeOwnershipAngle: safeText(
-      (idea as ProductIdeaDraft).sourceCodeOwnershipAngle ?? raw.sourceCodeOwnershipAngle ?? idea.whyBuySourceCode ?? raw.why_buy_source_code,
-      "",
-    ),
-    whyBuySourceCode: safeText(
-      idea.whyBuySourceCode ?? raw.why_buy_source_code ?? raw.sourceCodeOwnershipAngle,
-      "The buyer can adapt evidence templates, workflow rules, and exports for their exact client process.",
-    ),
-    manualWorkaroundToday: safeText(
-      (idea as ProductIdeaDraft).manualWorkaroundToday ?? raw.manualWorkaroundToday,
-      "",
-    ),
-    messyInput: safeText((idea as ProductIdeaDraft).messyInput ?? raw.messyInput, ""),
-    outputArtifact: safeText((idea as ProductIdeaDraft).outputArtifact ?? raw.outputArtifact, ""),
-    painfulMoment: safeText((idea as ProductIdeaDraft).painfulMoment ?? raw.painfulMoment, ""),
-    broadSaasNotEnoughReason: safeText(
-      (idea as ProductIdeaDraft).broadSaasNotEnoughReason ?? raw.broadSaasNotEnoughReason,
-      "",
-    ),
-    beforeAfterDemo: safeText((idea as ProductIdeaDraft).beforeAfterDemo ?? raw.beforeAfterDemo, ""),
-    initialSearchQueries: Array.isArray(raw.initialSearchQueries)
-      ? raw.initialSearchQueries
-      : (idea as ProductIdeaDraft).initialSearchQueries,
-    mvpFeatures: safeList(idea.mvpFeatures).length
-      ? safeList(idea.mvpFeatures)
-      : [safeText(raw.demo_hook, "Demo the core buyer workflow end to end.")],
-    fullFeatures: safeList(idea.fullFeatures),
-    pricingIdea: safeText(idea.pricingIdea, "$149-$499 source-code license"),
-    buildComplexity: safeText((idea as ProductIdeaDraft).buildComplexity ?? raw.buildComplexity ?? raw.build_complexity, "medium"),
-    risks: safeList(idea.risks).length
-      ? safeList(idea.risks)
-      : [`Build complexity: ${safeText((idea as ProductIdeaDraft).buildComplexity ?? raw.buildComplexity ?? raw.build_complexity, "medium")}`],
-    status: "generated" as const,
-  };
+    const initialQueries = normalizeInitialSearchQueries(
+      raw.initialSearchQueries ??
+        raw.initial_search_queries ??
+        raw.search_queries ??
+        raw.exa_queries,
+    );
+    const normalized: ProductIdeaDraft & { __rawKeys?: string[] } = {
+      id: idea.id,
+      title: safeText(
+        idea.title,
+        fallback[index]?.title ?? `Product Idea ${index + 1}`,
+      ),
+      description: safeText(
+        idea.description ?? raw.one_sentence,
+        fallback[index]?.description ?? "A practical full-source-code product.",
+      ),
+      exactBuyer: safeText(
+        (idea as ProductIdeaDraft).exactBuyer ??
+          raw.exactBuyer ??
+          raw.exact_buyer ??
+          raw.buyer ??
+          raw.target_buyer ??
+          idea.targetBuyer,
+        "Agencies and technical founders",
+      ),
+      targetBuyer: safeText(
+        idea.targetBuyer ??
+          raw.target_buyer ??
+          raw.exactBuyer ??
+          raw.exact_buyer ??
+          raw.buyer,
+        "Agencies and technical founders",
+      ),
+      pain: safeText(
+        idea.pain ??
+          raw.painfulMoment ??
+          raw.painful_moment ??
+          raw.pain_point ??
+          raw.painful_event,
+        raw.one_sentence ?? "The buyer wants to save implementation time.",
+      ),
+      sourceCodeOwnershipAngle: safeText(
+        (idea as ProductIdeaDraft).sourceCodeOwnershipAngle ??
+          raw.sourceCodeOwnershipAngle ??
+          raw.source_code_ownership_angle ??
+          raw.source_code_angle ??
+          raw.resale_angle ??
+          idea.whyBuySourceCode ??
+          raw.why_buy_source_code,
+        "",
+      ),
+      whyBuySourceCode: safeText(
+        idea.whyBuySourceCode ??
+          raw.why_buy_source_code ??
+          raw.sourceCodeOwnershipAngle ??
+          raw.source_code_ownership_angle ??
+          raw.source_code_angle ??
+          raw.resale_angle,
+        "The buyer can adapt evidence templates, workflow rules, and exports for their exact client process.",
+      ),
+      manualWorkaroundToday: safeText(
+        (idea as ProductIdeaDraft).manualWorkaroundToday ??
+          raw.manualWorkaroundToday ??
+          raw.manual_workaround_today ??
+          raw.manual_workaround ??
+          raw.workaround,
+        "",
+      ),
+      messyInput: safeText(
+        (idea as ProductIdeaDraft).messyInput ??
+          raw.messyInput ??
+          raw.messy_input ??
+          raw.input ??
+          raw.messy_inputs,
+        "",
+      ),
+      outputArtifact: safeText(
+        (idea as ProductIdeaDraft).outputArtifact ??
+          raw.outputArtifact ??
+          raw.output_artifact ??
+          raw.artifact ??
+          raw.useful_output,
+        "",
+      ),
+      painfulMoment: safeText(
+        (idea as ProductIdeaDraft).painfulMoment ??
+          raw.painfulMoment ??
+          raw.painful_moment ??
+          raw.pain_point ??
+          raw.painful_event,
+        "",
+      ),
+      broadSaasNotEnoughReason: safeText(
+        (idea as ProductIdeaDraft).broadSaasNotEnoughReason ??
+          raw.broadSaasNotEnoughReason ??
+          raw.broad_saas_not_enough_reason ??
+          raw.why_broad_saas_not_enough ??
+          raw.why_existing_tools_fail,
+        "",
+      ),
+      beforeAfterDemo: safeText(
+        (idea as ProductIdeaDraft).beforeAfterDemo ??
+          raw.beforeAfterDemo ??
+          raw.before_after_demo ??
+          raw.demo ??
+          raw.demo_hook,
+        "",
+      ),
+      initialSearchQueries: initialQueries,
+      mvpFeatures: safeList(idea.mvpFeatures).length
+        ? safeList(idea.mvpFeatures)
+        : [
+            safeText(
+              raw.demo_hook ?? raw.demo,
+              "Demo the core buyer workflow end to end.",
+            ),
+          ],
+      fullFeatures: safeList(idea.fullFeatures),
+      pricingIdea: safeText(idea.pricingIdea, "$149-$499 source-code license"),
+      buildComplexity: safeText(
+        (idea as ProductIdeaDraft).buildComplexity ??
+          raw.buildComplexity ??
+          raw.build_complexity ??
+          raw.complexity,
+        "medium",
+      ),
+      risks: safeList(idea.risks).length
+        ? safeList(idea.risks)
+        : [
+            `Build complexity: ${safeText((idea as ProductIdeaDraft).buildComplexity ?? raw.buildComplexity ?? raw.build_complexity ?? raw.complexity, "medium")}`,
+          ],
+      fallbackGenerated: raw.fallbackGenerated,
+      status: "generated" as const,
+    };
+    normalized.__rawKeys = Object.keys(raw).sort();
+    return normalized;
   });
 }
-
 
 function findExistenceCheck(state: DebateState, title: string) {
   return state.toolExistenceChecks.find((check) => check.ideaTitle === title);
@@ -3994,19 +4790,30 @@ function summarizeToolExistenceCheck(check?: ToolExistenceCheck) {
   };
 }
 
-function summarizeExistenceChecksForPrompt(checks: ToolExistenceCheck[], limit: number) {
+function summarizeExistenceChecksForPrompt(
+  checks: ToolExistenceCheck[],
+  limit: number,
+) {
   return checks.slice(0, limit).map(summarizeToolExistenceCheck);
 }
 
-function marketChecksAsEvidenceDrafts(checks: ToolExistenceCheck[]): MarketEvidenceDraft[] {
+function marketChecksAsEvidenceDrafts(
+  checks: ToolExistenceCheck[],
+): MarketEvidenceDraft[] {
   return checks.slice(0, 5).map((check) => ({
     productIdeaId: null,
     sourceType: "market_search",
     sourceName: "Market Search Reality Check",
-    sourceUrl: check.similarSaaSTools[0]?.url ?? check.similarSourceCodeKits[0]?.url ?? null,
+    sourceUrl:
+      check.similarSaaSTools[0]?.url ??
+      check.similarSourceCodeKits[0]?.url ??
+      null,
     title: `Market Search Reality Check: ${check.ideaTitle}`,
     content: renderMarketSearchSummary(check),
-    signalType: check.exactToolExists || check.commonCategoryRisk === "high" ? "competitor" : "market_gap_check",
+    signalType:
+      check.exactToolExists || check.commonCategoryRisk === "high"
+        ? "competitor"
+        : "market_gap_check",
     strengthScore: normalizeStrengthScore(check.confidence),
   }));
 }
@@ -4024,8 +4831,18 @@ function renderMarketSearchSummary(check: ToolExistenceCheck) {
     `source_code_gap_score: ${check.sourceCodeGapScore}/10`,
     `confidence: ${check.confidence}/100`,
     `queries_used: ${check.evidence.map((item) => item.query).join("; ")}`,
-    `similar_tools_found: ${check.similarSaaSTools.slice(0, 5).map((result) => `${result.title} (${result.url})`).join("; ") || "none in searched results"}`,
-    `source_code_kits_found: ${check.similarSourceCodeKits.slice(0, 5).map((result) => `${result.title} (${result.url})`).join("; ") || "none in searched results"}`,
+    `similar_tools_found: ${
+      check.similarSaaSTools
+        .slice(0, 5)
+        .map((result) => `${result.title} (${result.url})`)
+        .join("; ") || "none in searched results"
+    }`,
+    `source_code_kits_found: ${
+      check.similarSourceCodeKits
+        .slice(0, 5)
+        .map((result) => `${result.title} (${result.url})`)
+        .join("; ") || "none in searched results"
+    }`,
     check.notes,
   ].join("\n");
 }
@@ -4039,7 +4856,11 @@ function classifyMarketResults(check: ToolExistenceCheck) {
   const manualContent = check.evidence
     .flatMap((item) => item.results)
     .filter(Boolean)
-    .some((result) => /template|spreadsheet|google\s*sheets|notion|sop|checklist|download|pdf|doc\b|\bforms?\b/i.test(`${result.title} ${result.url} ${result.snippet}`));
+    .some((result) =>
+      /template|spreadsheet|google\s*sheets|notion|sop|checklist|download|pdf|doc\b|\bforms?\b/i.test(
+        `${result.title} ${result.url} ${result.snippet}`,
+      ),
+    );
 
   const adjacentBroad =
     check.commonCategoryRisk !== "low" ||
@@ -4069,9 +4890,22 @@ function renderMarketSearchRoundMessage(checks: ToolExistenceCheck[]) {
   return `# Market Search / Existence Check\n\n${checks
     .map((check) => {
       const classified = classifyMarketResults(check);
-      return `## ${check.ideaTitle}\n- Market search status: ${check.marketSearchStatus}\n- Evidence classification: exact_same_workflow=${classified.exactSameWorkflow ? "yes" : "no"}; adjacent_broad_saas=${classified.adjacentBroadSaaS ? "yes" : "no"}; source_code_or_template=${classified.sourceCodeOrTemplate ? "yes" : "no"}; manual_workaround_content=${classified.manualWorkaroundContent ? "yes" : "no"}; no_close_result=${classified.noCloseResult ? "yes" : "no"}\n- Exact tool exists in searched results: ${check.exactToolExists ? "yes" : "no/uncertain"}\n- Similar SaaS/tools found: ${check.similarSaaSTools.length}\n- Similar source-code kits/templates found: ${check.similarSourceCodeKits.length}\n- Common category risk: ${check.commonCategoryRisk}\n- Actual tool gap cap: ${check.actualToolGapScore}/10\n- Source-code gap cap: ${check.sourceCodeGapScore}/10\n- Confidence: ${check.confidence}/100\n- Queries used: ${check.evidence.map((item) => `"${item.query}"`).join(", ")}\n- Top similar tools: ${check.similarSaaSTools.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious tools found in searched results."}\n- Top source-code kits: ${check.similarSourceCodeKits.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious source-code kits found in searched results."}\n- Notes: ${check.notes}`;
+      return `## ${check.ideaTitle}\n- Market search status: ${check.marketSearchStatus}\n- Evidence classification: exact_same_workflow=${classified.exactSameWorkflow ? "yes" : "no"}; adjacent_broad_saas=${classified.adjacentBroadSaaS ? "yes" : "no"}; source_code_or_template=${classified.sourceCodeOrTemplate ? "yes" : "no"}; manual_workaround_content=${classified.manualWorkaroundContent ? "yes" : "no"}; no_close_result=${classified.noCloseResult ? "yes" : "no"}\n- Exact tool exists in searched results: ${check.exactToolExists ? "yes" : "no/uncertain"}\n- Similar SaaS/tools found: ${check.similarSaaSTools.length}\n- Similar source-code kits/templates found: ${check.similarSourceCodeKits.length}\n- Common category risk: ${check.commonCategoryRisk}\n- Actual tool gap cap: ${check.actualToolGapScore}/10\n- Source-code gap cap: ${check.sourceCodeGapScore}/10\n- Confidence: ${check.confidence}/100\n- Queries used: ${check.evidence.map((item) => `"${item.query}"`).join(", ")}\n- Top similar tools: ${
+        check.similarSaaSTools
+          .slice(0, 5)
+          .map((result) => `${result.title} — ${result.url}`)
+          .join("; ") || "No obvious tools found in searched results."
+      }\n- Top source-code kits: ${
+        check.similarSourceCodeKits
+          .slice(0, 5)
+          .map((result) => `${result.title} — ${result.url}`)
+          .join("; ") ||
+        "No obvious source-code kits found in searched results."
+      }\n- Notes: ${check.notes}`;
     })
-    .join("\n\n")}\n\nSafety language: these checks mean "not found in searched market evidence," not "does not exist in the world." Build now is blocked when market search fails, confidence is low, exact tools are obvious, or category risk is high.`;
+    .join(
+      "\n\n",
+    )}\n\nSafety language: these checks mean "not found in searched market evidence," not "does not exist in the world." Build now is blocked when market search fails, confidence is low, exact tools are obvious, or category risk is high.`;
 }
 
 function renderInteractiveCouncilMessage(message: {
@@ -4084,17 +4918,24 @@ function renderInteractiveCouncilMessage(message: {
   return [
     `Claim type: ${message.claimType}`,
     message.replyingToAgent ? `Replying to: ${message.replyingToAgent}` : null,
-    message.referencedIdea ? `Referenced idea: ${message.referencedIdea}` : null,
+    message.referencedIdea
+      ? `Referenced idea: ${message.referencedIdea}`
+      : null,
     "",
     message.message,
     "",
-    message.evidenceLinks.length ? `Evidence links: ${message.evidenceLinks.join(", ")}` : "Evidence links: none cited",
+    message.evidenceLinks.length
+      ? `Evidence links: ${message.evidenceLinks.join(", ")}`
+      : "Evidence links: none cited",
   ]
     .filter((line) => line !== null)
     .join("\n");
 }
 
-function ensureAtLeastThreeRisks(risks: string[] | undefined, idea: ProductIdeaDraft) {
+function ensureAtLeastThreeRisks(
+  risks: string[] | undefined,
+  idea: ProductIdeaDraft,
+) {
   const merged = safeList(risks);
   const defaults = [
     `${idea.title} may feel generic unless the buyer niche is explicit.`,
@@ -4203,7 +5044,11 @@ function normalizeBuildPlan(value: unknown) {
       if (!item || typeof item !== "object") {
         return null;
       }
-      const candidate = item as { day?: unknown; focus?: unknown; deliverable?: unknown };
+      const candidate = item as {
+        day?: unknown;
+        focus?: unknown;
+        deliverable?: unknown;
+      };
       return {
         day: ensureString(candidate.day).trim(),
         focus: ensureString(candidate.focus).trim(),
@@ -4227,9 +5072,14 @@ function truncateText(value: string | null | undefined, maxLength: number) {
 }
 
 function inferIdeaBuildComplexity(idea: ProductIdeaDraft) {
-  const text = `${idea.title} ${idea.description} ${idea.mvpFeatures.join(" ")}`.toLowerCase();
+  const text =
+    `${idea.title} ${idea.description} ${idea.mvpFeatures.join(" ")}`.toLowerCase();
 
-  if (/marketplace|integration|mobile|multi-tenant|enterprise|analytics/.test(text)) {
+  if (
+    /marketplace|integration|mobile|multi-tenant|enterprise|analytics/.test(
+      text,
+    )
+  ) {
     return "medium-high";
   }
 
@@ -4246,7 +5096,10 @@ function safeList(value: unknown) {
   }
 
   return value
-    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .filter(
+      (item): item is string =>
+        typeof item === "string" && item.trim().length > 0,
+    )
     .map((item) => item.trim());
 }
 
@@ -4254,7 +5107,9 @@ function findAgent(agents: CouncilAgent[], key: CouncilAgent["key"]) {
   return agents.find((agent) => agent.key === key) ?? agentByKey(key);
 }
 
-export function createInitialMarketEvidence(run: CouncilRunInput): MarketEvidenceDraft[] {
+export function createInitialMarketEvidence(
+  run: CouncilRunInput,
+): MarketEvidenceDraft[] {
   const provided = run.marketEvidence ?? [];
   const notes = run.marketEvidenceNotes?.trim();
 
@@ -4284,7 +5139,9 @@ function inferSignalType(content: string) {
     return "willingness_to_pay";
   }
 
-  if (/competitor|alternative|too expensive|subscription|tool|product/.test(text)) {
+  if (
+    /competitor|alternative|too expensive|subscription|tool|product/.test(text)
+  ) {
     return "competitor_weakness";
   }
 

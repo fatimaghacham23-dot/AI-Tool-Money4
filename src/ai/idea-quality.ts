@@ -11,9 +11,9 @@ export type HiddenWorkflowIdeaFields = {
   sourceCodeOwnershipAngle?: string;
   whyBuySourceCode?: string;
   initialSearchQueries?: string[];
+  fallbackGenerated?: boolean;
   buildComplexity?: string;
 };
-
 
 export const REQUIRED_WORKFLOW_FIELDS = [
   "title",
@@ -50,25 +50,63 @@ const CONCRETE_EVENT_REGEX =
 
 const BUILD_COMPLEXITIES = new Set(["low", "medium", "high"]);
 
+const BAD_SEARCH_QUERY_REGEX =
+  /\b(they\s+(want|need|keep)|save\s+time|streamline|automate\s+(workflow|task|process)|ai\s+tool|full\s+target\s+buyer\s+list|broad\s+goals?)\b/i;
+
+export function isBadInitialSearchQuery(query: string) {
+  const normalized = normalizeTitle(query);
+  return (
+    !normalized ||
+    BAD_SEARCH_QUERY_REGEX.test(normalized) ||
+    GENERIC_FILLER_REGEX.test(normalized)
+  );
+}
+
+export function normalizeInitialSearchQueries(queries: unknown) {
+  if (!Array.isArray(queries)) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      queries
+        .filter((query): query is string => typeof query === "string")
+        .map((query) => normalizeTitle(query))
+        .filter((query) => query.length > 0 && !isBadInitialSearchQuery(query)),
+    ),
+  ];
+}
+
 export function validateRequiredWorkflowFields(idea: HiddenWorkflowIdeaFields) {
   const issues: WorkflowFieldIssue[] = [];
-  const read = (field: RequiredWorkflowField) => workflowFieldValue(idea, field);
+  const read = (field: RequiredWorkflowField) =>
+    workflowFieldValue(idea, field);
 
   for (const field of REQUIRED_WORKFLOW_FIELDS) {
     const value = read(field);
     if (field === "initialSearchQueries") {
-      const queries = Array.isArray(idea.initialSearchQueries) ? idea.initialSearchQueries : [];
-      if (queries.length < 5) {
-        issues.push({ field, reason: "missing at least 5 concrete search queries" });
-      } else if (queries.some((query) => GENERIC_FILLER_REGEX.test(query) || !CONCRETE_EVENT_REGEX.test(query))) {
-        issues.push({ field, reason: "queries must name concrete workflow artifacts or events" });
+      const queries = normalizeInitialSearchQueries(idea.initialSearchQueries);
+      const concreteQueries = queries.filter(
+        (query) =>
+          CONCRETE_EVENT_REGEX.test(query) ||
+          CONCRETE_ARTIFACT_REGEX.test(query) ||
+          CONCRETE_INPUT_REGEX.test(query),
+      );
+      if (concreteQueries.length < 4) {
+        issues.push({
+          field,
+          reason: "missing at least 4 non-bad concrete search queries",
+        });
       }
       continue;
     }
 
     if (field === "buildComplexity") {
       if (!BUILD_COMPLEXITIES.has(value.toLowerCase())) {
-        issues.push({ field, reason: "missing low, medium, or high build complexity" });
+        issues.push({
+          field,
+          reason: "missing low, medium, or high build complexity",
+        });
       }
       continue;
     }
@@ -94,17 +132,31 @@ export function validateRequiredWorkflowFields(idea: HiddenWorkflowIdeaFields) {
       continue;
     }
 
-    if (["manualWorkaroundToday", "messyInput"].includes(field) && !CONCRETE_INPUT_REGEX.test(value)) {
+    if (
+      field === "manualWorkaroundToday" &&
+      !CONCRETE_INPUT_REGEX.test(value)
+    ) {
+      issues.push({
+        field,
+        reason: "does not mention a manual tool or process",
+      });
+      continue;
+    }
+
+    if (field === "messyInput" && !CONCRETE_INPUT_REGEX.test(value)) {
       issues.push({ field, reason: "does not mention a concrete input" });
       continue;
     }
 
-    if (["outputArtifact", "beforeAfterDemo"].includes(field) && !CONCRETE_ARTIFACT_REGEX.test(value)) {
+    if (
+      ["outputArtifact", "beforeAfterDemo"].includes(field) &&
+      !CONCRETE_ARTIFACT_REGEX.test(value)
+    ) {
       issues.push({ field, reason: "does not mention a concrete artifact" });
       continue;
     }
 
-    if (["painfulMoment", "broadSaasNotEnoughReason"].includes(field) && !CONCRETE_EVENT_REGEX.test(value)) {
+    if (field === "painfulMoment" && !CONCRETE_EVENT_REGEX.test(value)) {
       issues.push({ field, reason: "does not mention a concrete event" });
       continue;
     }
@@ -117,13 +169,22 @@ export function validateRequiredWorkflowFields(idea: HiddenWorkflowIdeaFields) {
   };
 }
 
-export function workflowFieldValue(idea: HiddenWorkflowIdeaFields, field: RequiredWorkflowField) {
-  if (field === "exactBuyer") return normalizeTitle(idea.exactBuyer ?? idea.targetBuyer ?? "");
+export function workflowFieldValue(
+  idea: HiddenWorkflowIdeaFields,
+  field: RequiredWorkflowField,
+) {
+  if (field === "exactBuyer")
+    return normalizeTitle(idea.exactBuyer ?? idea.targetBuyer ?? "");
   if (field === "sourceCodeOwnershipAngle") {
-    return normalizeTitle(idea.sourceCodeOwnershipAngle ?? idea.whyBuySourceCode ?? "");
+    return normalizeTitle(
+      idea.sourceCodeOwnershipAngle ?? idea.whyBuySourceCode ?? "",
+    );
   }
-  if (field === "initialSearchQueries") return (idea.initialSearchQueries ?? []).join(" | ");
-  return normalizeTitle(String(idea[field as keyof HiddenWorkflowIdeaFields] ?? ""));
+  if (field === "initialSearchQueries")
+    return normalizeInitialSearchQueries(idea.initialSearchQueries).join(" | ");
+  return normalizeTitle(
+    String(idea[field as keyof HiddenWorkflowIdeaFields] ?? ""),
+  );
 }
 
 function workflowFieldMinWords(field: RequiredWorkflowField) {
@@ -132,10 +193,18 @@ function workflowFieldMinWords(field: RequiredWorkflowField) {
       return 1;
     case "exactBuyer":
       return 3;
+    case "manualWorkaroundToday":
+      return 6;
     case "messyInput":
-      return 5;
+      return 3;
     case "outputArtifact":
-      return 4;
+      return 3;
+    case "painfulMoment":
+      return 6;
+    case "broadSaasNotEnoughReason":
+      return 6;
+    case "sourceCodeOwnershipAngle":
+      return 6;
     case "buildComplexity":
     case "initialSearchQueries":
       return 1;
@@ -223,7 +292,10 @@ export function normalizeProductTitle(title: string, buyer?: string) {
     .trim();
 
   for (const phrase of TITLE_GENERIC_PHRASES) {
-    cleaned = cleaned.replace(new RegExp(`\\b${escapeRegExp(phrase)}\\b`, "gi"), " ");
+    cleaned = cleaned.replace(
+      new RegExp(`\\b${escapeRegExp(phrase)}\\b`, "gi"),
+      " ",
+    );
   }
 
   cleaned = cleaned
@@ -239,11 +311,16 @@ export function normalizeProductTitle(title: string, buyer?: string) {
   }
 
   cleaned = collapseCommaSeparatedBuyerSuffix(cleaned, conciseBuyer);
-  cleaned = cleaned.replace(/\s*,\s*/g, " ").replace(/\s+/g, " ").trim();
+  cleaned = cleaned
+    .replace(/\s*,\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   cleaned = cleaned.replace(/\s+\b(for|to|with|and|of)\b\s*$/i, "").trim();
 
   if (!cleaned) {
-    cleaned = conciseBuyer ? `Workflow Proof for ${conciseBuyer}` : "Workflow Proof Builder";
+    cleaned = conciseBuyer
+      ? `Workflow Proof for ${conciseBuyer}`
+      : "Workflow Proof Builder";
   }
 
   cleaned = limitTitleWords(cleaned, conciseBuyer);
@@ -282,14 +359,19 @@ export function areSimilarIdeaFingerprints(left: string, right: string) {
     return false;
   }
 
-  const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  const overlap = [...leftTokens].filter((token) =>
+    rightTokens.has(token),
+  ).length;
   const smaller = Math.min(leftTokens.size, rightTokens.size);
   const larger = Math.max(leftTokens.size, rightTokens.size);
 
   return overlap / smaller >= 0.8 || overlap / larger >= 0.72;
 }
 
-export function chooseStrongerIdea<T extends HiddenWorkflowIdeaFields>(left: T, right: T) {
+export function chooseStrongerIdea<T extends HiddenWorkflowIdeaFields>(
+  left: T,
+  right: T,
+) {
   return ideaStrengthScore(right) > ideaStrengthScore(left) ? right : left;
 }
 
@@ -302,12 +384,15 @@ export function isGenericProductTitle(title: string) {
   const tokens = normalized.split(/[^a-z0-9]+/).filter(Boolean);
   const isVeryShort = tokens.length <= 3;
 
-  const containsGenericTerm = GENERIC_TITLE_TERMS.some((term) => normalized.includes(term));
+  const containsGenericTerm = GENERIC_TITLE_TERMS.some((term) =>
+    normalized.includes(term),
+  );
   const matchesCategory = GENERIC_CATEGORY_REGEX.test(normalized);
 
-  const lacksContextSignals = !/(for\s+|\b(agency|agencies|studio|shops?|teams?|firms?|law|legal|accounting|accountants|web|branding|design|dev|construction|real estate|recruit|sales)\b)/i.test(
-    normalized,
-  );
+  const lacksContextSignals =
+    !/(for\s+|\b(agency|agencies|studio|shops?|teams?|firms?|law|legal|accounting|accountants|web|branding|design|dev|construction|real estate|recruit|sales)\b)/i.test(
+      normalized,
+    );
 
   if (matchesCategory) {
     return true;
@@ -350,25 +435,39 @@ export function rewriteGenericIdeaToWorkflowGap(
   };
 }
 
-function removeRawBuyerSuffix(title: string, buyer: string, conciseBuyer: string) {
+function removeRawBuyerSuffix(
+  title: string,
+  buyer: string,
+  conciseBuyer: string,
+) {
   const rawBuyer = normalizeTitle(buyer);
   if (!rawBuyer) {
     return title;
   }
 
-  const exactSuffix = new RegExp(`\\s+for\\s+${escapeRegExp(rawBuyer)}\\s*$`, "i");
+  const exactSuffix = new RegExp(
+    `\\s+for\\s+${escapeRegExp(rawBuyer)}\\s*$`,
+    "i",
+  );
   if (exactSuffix.test(title)) {
-    return title.replace(exactSuffix, conciseBuyer ? ` for ${conciseBuyer}` : "").trim();
+    return title
+      .replace(exactSuffix, conciseBuyer ? ` for ${conciseBuyer}` : "")
+      .trim();
   }
 
   if (title.toLowerCase().includes(rawBuyer.toLowerCase())) {
-    return title.replace(new RegExp(escapeRegExp(rawBuyer), "gi"), conciseBuyer).trim();
+    return title
+      .replace(new RegExp(escapeRegExp(rawBuyer), "gi"), conciseBuyer)
+      .trim();
   }
 
   return title;
 }
 
-function collapseCommaSeparatedBuyerSuffix(title: string, conciseBuyer: string) {
+function collapseCommaSeparatedBuyerSuffix(
+  title: string,
+  conciseBuyer: string,
+) {
   const match = title.match(/\bfor\s+(.+)$/i);
   if (!match) {
     return title;
@@ -447,7 +546,10 @@ function hasCommaSeparatedBuyerList(title: string, buyer?: string) {
   }
 
   const rawBuyer = normalizeTitle(buyer ?? "");
-  return Boolean(rawBuyer.includes(",") && title.toLowerCase().includes(rawBuyer.toLowerCase()));
+  return Boolean(
+    rawBuyer.includes(",") &&
+    title.toLowerCase().includes(rawBuyer.toLowerCase()),
+  );
 }
 
 function fingerprintTokens(text: string) {
@@ -455,7 +557,9 @@ function fingerprintTokens(text: string) {
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
-    .filter((token) => token.length > 2 && !FINGERPRINT_GENERIC_WORDS.has(token))
+    .filter(
+      (token) => token.length > 2 && !FINGERPRINT_GENERIC_WORDS.has(token),
+    )
     .sort();
 }
 
@@ -498,7 +602,10 @@ function titleCaseTitle(text: string) {
     .filter(Boolean)
     .map((word) => {
       const lower = word.toLowerCase();
-      return preserve.get(lower) ?? `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`;
+      return (
+        preserve.get(lower) ??
+        `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`
+      );
     })
     .join(" ");
 }
