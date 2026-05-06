@@ -146,6 +146,12 @@ type JudgeDecision = {
   whyOthersLost: Array<{ title: string; reason: string }>;
 };
 
+type KillSwitchResult = {
+  originalIdeas: ProductIdeaDraft[];
+  survivingIdeas: ProductIdeaDraft[];
+  removedIdeas: Array<{ idea: ProductIdeaDraft; reason: string }>;
+};
+
 const ROUND_DEFINITIONS = [
   {
     roundNumber: 1,
@@ -304,7 +310,19 @@ export async function runCouncilDebate({
   );
 
   const round15 = await createRound(1, persistence);
-  await runGenericIdeaKillSwitch(state, provider, sourceAgent, tracer, round15, persistence);
+  const killSwitchResult = await runGenericIdeaKillSwitch(state, provider, sourceAgent, tracer, round15, persistence);
+
+  if (killSwitchResult.survivingIdeas.length === 0) {
+    return finishRejectAllAfterKillSwitch({
+      state,
+      provider,
+      enabledAgents,
+      judgeAgent,
+      killSwitchResult,
+      persistence,
+      tracer,
+    });
+  }
 
   const round2 = await createRound(2, persistence);
   const topResponse = await chooseTopIdeas(state, provider, skepticAgent, tracer, round2, persistence);
@@ -313,7 +331,7 @@ export async function runCouncilDebate({
   const topTitles = new Set(topResponse.topIdeas.map((idea) => idea.title));
 
   await persistence?.updateIdeaStatuses(
-    ideas.map((idea) => ({
+    state.ideas.map((idea) => ({
       id: idea.id,
       title: idea.title,
       status: rejectedTitles.has(idea.title) ? "rejected" : "generated",
@@ -331,10 +349,10 @@ export async function runCouncilDebate({
   );
 
   const round3 = await createRound(3, persistence);
-  const shortlistedIdeas = ideas
+  const shortlistedIdeas = state.ideas
     .filter((idea) => topTitles.has(idea.title))
     .slice(0, 5);
-  state.shortlist = shortlistedIdeas.length ? shortlistedIdeas : ideas.slice(0, 5);
+  state.shortlist = shortlistedIdeas.length ? shortlistedIdeas : state.ideas.slice(0, 5);
 
   await persistence?.updateIdeaStatuses(
     state.shortlist.map((idea) => ({
@@ -1029,54 +1047,43 @@ async function runGenericIdeaKillSwitch(
   tracer?: RunDebugTracer,
   round?: RoundRecord,
   persistence?: DebatePersistence,
-) {
+): Promise<KillSwitchResult> {
   const original = state.ideas;
   const rejected: Array<{ title: string; reason: string }> = [];
+  const removedIdeas: Array<{ idea: ProductIdeaDraft; reason: string }> = [];
+
+  const reject = (idea: ProductIdeaDraft, reason: string, code: string) => {
+    rejected.push({ title: idea.title, reason });
+    removedIdeas.push({ idea, reason });
+    tracer?.addEvent({
+      step: "generic_idea_rejected",
+      status: "ok",
+      round: round?.title,
+      agent: agent.name,
+      provider: provider.name,
+      model: modelForRound(agent, provider, round),
+      details: { title: truncateText(idea.title, 140), reason: code },
+    });
+  };
 
   const survivors = original.filter((idea) => {
     if (isGenericProductTitle(idea.title)) {
-      rejected.push({ title: idea.title, reason: "Generic title" });
-      tracer?.addEvent({
-        step: "generic_idea_rejected",
-        status: "ok",
-        round: round?.title,
-        agent: agent.name,
-        provider: provider.name,
-        model: modelForRound(agent, provider, round),
-        details: { title: truncateText(idea.title, 140), reason: "generic_title" },
-      });
+      reject(idea, "Generic title", "generic_title");
       return false;
     }
 
     if (!hasHiddenWorkflowSpecificity(idea)) {
-      rejected.push({
-        title: idea.title,
-        reason: "Missing manual workaround / messy input / output artifact / painful moment",
-      });
-      tracer?.addEvent({
-        step: "generic_idea_rejected",
-        status: "ok",
-        round: round?.title,
-        agent: agent.name,
-        provider: provider.name,
-        model: modelForRound(agent, provider, round),
-        details: { title: truncateText(idea.title, 140), reason: "missing_structured_fields" },
-      });
+      reject(
+        idea,
+        "Missing manual workaround / messy input / output artifact / painful moment",
+        "missing_structured_fields",
+      );
       return false;
     }
 
     const demo = (idea.beforeAfterDemo ?? "").trim();
     if (demo.length < 18 || /save time|automate|streamline|manage/i.test(demo)) {
-      rejected.push({ title: idea.title, reason: "Vague before/after demo" });
-      tracer?.addEvent({
-        step: "generic_idea_rejected",
-        status: "ok",
-        round: round?.title,
-        agent: agent.name,
-        provider: provider.name,
-        model: modelForRound(agent, provider, round),
-        details: { title: truncateText(idea.title, 140), reason: "vague_demo" },
-      });
+      reject(idea, "Vague before/after demo", "vague_demo");
       return false;
     }
 
@@ -1084,6 +1091,13 @@ async function runGenericIdeaKillSwitch(
   });
 
   state.ideas = survivors;
+  state.rejectedIdeas.push(
+    ...removedIdeas.map((item) => ({
+      title: item.idea.title,
+      reason: item.reason,
+      risks: uniqueStrings([item.reason, ...(item.idea.risks ?? [])]),
+    })),
+  );
   await persistence?.updateIdeaStatuses(
     rejected.map((item) => ({ title: item.title, status: "rejected" as const })),
   );
@@ -1100,8 +1114,26 @@ async function runGenericIdeaKillSwitch(
     );
   }
 
+  if (survivors.length === 0) {
+    tracer?.addEvent({
+      step: "kill_switch_reject_all",
+      status: "ok",
+      round: round?.title,
+      agent: agent.name,
+      provider: provider.name,
+      model: modelForRound(agent, provider, round),
+      details: {
+        originalIdeas: original.map((idea) => idea.title),
+        survivingIdeas: [],
+        removedIdeas: removedIdeas.map((item) => item.idea.title),
+        reasons: removedIdeas.map((item) => ({ title: item.idea.title, reason: item.reason })),
+      },
+    });
+    return { originalIdeas: original, survivingIdeas: survivors, removedIdeas };
+  }
+
   if (survivors.length >= 5 || !round) {
-    return;
+    return { originalIdeas: original, survivingIdeas: state.ideas, removedIdeas };
   }
 
   const model = modelForRound(agent, provider, round);
@@ -1194,6 +1226,8 @@ Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
     provider.name,
     "replacement_generation",
   ).ideas.slice(0, 12);
+
+  return { originalIdeas: original, survivingIdeas: state.ideas, removedIdeas };
 }
 
 function renderGenericKillSwitchMessage(
@@ -2019,6 +2053,117 @@ async function applyPostMarketSearchGate(
   );
 
   return { decision: "reject_all", scoredIdeas };
+}
+
+
+async function finishRejectAllAfterKillSwitch({
+  state,
+  provider,
+  enabledAgents,
+  judgeAgent,
+  killSwitchResult,
+  persistence,
+  tracer,
+}: {
+  state: DebateState;
+  provider: AIProvider;
+  enabledAgents: CouncilAgent[];
+  judgeAgent: CouncilAgent;
+  killSwitchResult: KillSwitchResult;
+  persistence?: DebatePersistence;
+  tracer?: RunDebugTracer;
+}): Promise<DebateArtifacts> {
+  state.finalDecision = "reject_all";
+  state.finalDecisionReason =
+    "All generated ideas were removed by the generic/structure kill switch before market search.";
+  state.shortlist = [];
+  state.toolExistenceChecks = [];
+  state.marketSearchStatus = "completed";
+
+  const scoredIdeas = createMarketGateRejectedScores(killSwitchResult.originalIdeas, state).map((idea) => ({
+    ...idea,
+    scoreReason:
+      "Rejected before market search because Round 1.5 removed every idea for generic structure or missing hidden-workflow fields.",
+    lostReason:
+      killSwitchResult.removedIdeas.find((item) => item.idea.title === idea.title)?.reason ??
+      "Removed by Round 1.5 generic/structure kill switch.",
+  }));
+  const highestRejected = sortByScore(scoredIdeas)[0];
+
+  await persistence?.saveScores(scoredIdeas);
+  await persistence?.updateIdeaStatuses(
+    killSwitchResult.originalIdeas.map((idea) => ({
+      id: idea.id,
+      title: idea.title,
+      status: "rejected",
+    })),
+  );
+
+  const round8 = await createRound(7, persistence);
+  const report = createDeterministicReport(
+    state.run,
+    highestRejected,
+    {
+      ...createReportContext(state, scoredIdeas),
+      shortlistedIdeas: [],
+      finalDecision: "reject_all",
+      finalDecisionReason: state.finalDecisionReason,
+    },
+    {
+      onBetterDirectionGenerated: (direction) => {
+        tracer?.addEvent({
+          step: "better_direction_generated",
+          status: "ok",
+          round: round8.title,
+          agent: judgeAgent.name,
+          provider: provider.name,
+          details: {
+            title: direction.title,
+            queries: direction.queries,
+          },
+        });
+      },
+    },
+  );
+  await persistence?.saveFinalReport(report, highestRejected);
+
+  await recordMessage(
+    state,
+    persistence,
+    round8,
+    judgeAgent,
+    "All generated ideas were removed by the generic/structure kill switch before market search.",
+    modelForRound(judgeAgent, provider, round8),
+    provider.name,
+  );
+
+  await persistence?.updateRunProgress?.({
+    currentRound: round8.title,
+    currentAgent: judgeAgent.name,
+    currentStep: "Council rejected all at Round 1.5 kill switch",
+    currentProvider: provider.name,
+    currentModel: modelForRound(judgeAgent, provider, round8),
+    progressPercent: 100,
+  });
+  await persistence?.markRunStatus?.("completed");
+  tracer?.completeStep("update_run_completed", {
+    status: "completed",
+    finalDecision: "reject_all",
+    reason: "kill_switch_reject_all",
+  });
+  tracer?.completeStep("start_debate_runner", { status: "completed" });
+
+  return {
+    run: state.run,
+    agents: enabledAgents,
+    ideas: state.ideas,
+    marketEvidence: state.marketEvidence,
+    toolExistenceChecks: state.toolExistenceChecks,
+    shortlistedIdeas: state.shortlist,
+    scoredIdeas,
+    winner: highestRejected,
+    report,
+  };
 }
 
 async function finishRejectAllAfterMarketGate({
