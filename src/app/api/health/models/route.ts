@@ -7,6 +7,7 @@ import {
   getGitHubModelsTokenDiagnostics,
   hasOpenAIEnv,
 } from "@/lib/env";
+import { getMarketSearchProviderDiagnostics } from "@/lib/market-search/provider";
 import { GitHubModelsProvider, ProviderError } from "@/providers/github-models";
 
 export const runtime = "nodejs";
@@ -158,6 +159,7 @@ export async function GET(request: Request) {
   }
 
   const openAIConfigured = hasOpenAIEnv();
+  const marketSearch = getMarketSearchProviderDiagnostics();
   const demoModeFallback = !githubConfigured && !openAIConfigured;
   const githubModelsBase = {
     configured: githubConfigured,
@@ -189,6 +191,7 @@ export async function GET(request: Request) {
         hint: "GITHUB_MODELS_TOKEN is missing.",
       },
       openAIConfigured,
+      marketSearch,
       demoModeFallback,
     });
   }
@@ -207,6 +210,7 @@ export async function GET(request: Request) {
         rawFetchTest,
       },
       openAIConfigured,
+      marketSearch,
       demoModeFallback,
     },
   );

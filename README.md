@@ -87,6 +87,9 @@ OPENAI_MODEL=gpt-4o-mini
 
 GITHUB_MODELS_TOKEN=
 GITHUB_MODELS_BASE_URL=https://models.github.ai/inference
+
+BRAVE_SEARCH_API_KEY=
+EXA_API_KEY=
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` is included for future server-side admin tasks. The current app uses the authenticated server client for normal run creation and persistence.
@@ -198,6 +201,29 @@ Quick test:
 
 ```bash
 node scripts/test-github-models.mjs
+```
+
+## Market Search Setup
+
+The Market Search / Existence Check round uses searched web evidence before scoring `actual_tool_gap` and `source_code_gap`.
+
+Provider priority:
+
+1. Brave Search when `BRAVE_SEARCH_API_KEY` is configured.
+2. Exa Search when `EXA_API_KEY` is configured and Brave is not configured.
+3. Manual/fallback provider when neither key is configured.
+
+Add one of the search provider keys to `.env.local`:
+
+```env
+BRAVE_SEARCH_API_KEY=
+EXA_API_KEY=
+```
+
+The fallback provider is intentionally low-confidence and blocks `build_now`; it exists only to keep runs safe when no real market-search API is configured. To confirm which provider is active, open `/api/health/models` and check `marketSearch`, or run:
+
+```bash
+node scripts/test-market-search.mjs
 ```
 
 ## Debug GitHub Models 401

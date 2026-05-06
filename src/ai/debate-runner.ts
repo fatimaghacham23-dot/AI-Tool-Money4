@@ -3,6 +3,7 @@ import { runInteractiveCouncilChat } from "@/ai/interactive-council";
 import {
   applyMarketGapRules,
   canBuildNowWithMarketEvidence,
+  generateMarketSearchQueries,
   runMarketExistenceCheck,
 } from "@/ai/market-gap-scoring";
 import { expandMockIdeas } from "@/ai/mock-data";
@@ -31,7 +32,18 @@ import type {
   ProductScoreExplanations,
   ScoredProductIdea,
 } from "@/ai/types";
+import {
+  areSimilarIdeaFingerprints,
+  chooseStrongerIdea,
+  getIdeaFingerprint,
+  hasBadProductTitleQuality,
+  hasHiddenWorkflowSpecificity,
+  isGenericProductTitle,
+  normalizeProductTitle,
+  rewriteGenericIdeaToWorkflowGap,
+} from "@/ai/idea-quality";
 import type { RunDebugTracer } from "@/lib/debug/run-debug-tracer";
+import { normalizeStrengthScore } from "@/lib/db/market-evidence";
 import { createMarketSearchProvider } from "@/lib/market-search/provider";
 import type { ToolExistenceCheck } from "@/lib/market-search/types";
 import type { AIProvider } from "@/providers/types";
@@ -88,6 +100,7 @@ type DebateState = {
   whyOthersLost: Array<{ title: string; reason: string }>;
   finalDecision?: FinalDecision;
   finalDecisionReason?: string;
+  workflowDiscoveryBrief?: string;
 };
 
 type RoundRecord = DebateRoundDraft & { id: string };
@@ -141,36 +154,41 @@ const ROUND_DEFINITIONS = [
   },
   {
     roundNumber: 2,
+    roundType: "generic_kill_switch",
+    title: "Round 1.5: Generic Idea Kill Switch",
+  },
+  {
+    roundNumber: 3,
     roundType: "skeptic_filter",
     title: "Round 2: Skeptic Rejects Generic/Crowded Ideas",
   },
   {
-    roundNumber: 3,
+    roundNumber: 4,
     roundType: "shortlist",
     title: "Round 3: Keep Top 5 Ideas",
   },
   {
-    roundNumber: 4,
+    roundNumber: 5,
     roundType: "market_search",
     title: "Round 4: Market Search / Existence Check",
   },
   {
-    roundNumber: 5,
+    roundNumber: 6,
     roundType: "interactive_council_chat",
     title: "Round 5: Interactive Council Chat",
   },
   {
-    roundNumber: 6,
+    roundNumber: 7,
     roundType: "scoring",
     title: "Round 6: Score Each Idea With Evidence",
   },
   {
-    roundNumber: 7,
+    roundNumber: 8,
     roundType: "judge",
     title: "Round 7: Judge Makes Build Gate Decision",
   },
   {
-    roundNumber: 8,
+    roundNumber: 9,
     roundType: "final_report",
     title: "Round 8: Final Report + Validation Pack",
   },
@@ -272,8 +290,9 @@ export async function runCouncilDebate({
 
   const round1 = await createRound(0, persistence);
   const generatedIdeas = await generateIdeas(state, provider, sourceAgent, tracer, round1, persistence);
-  const ideas = (await persistence?.saveIdeas(generatedIdeas)) ?? generatedIdeas;
+  const ideas: ProductIdeaDraft[] = (await persistence?.saveIdeas(generatedIdeas)) ?? generatedIdeas;
   state.ideas = ideas;
+
   await recordMessage(
     state,
     persistence,
@@ -284,7 +303,10 @@ export async function runCouncilDebate({
     provider.name,
   );
 
-  const round2 = await createRound(1, persistence);
+  const round15 = await createRound(1, persistence);
+  await runGenericIdeaKillSwitch(state, provider, sourceAgent, tracer, round15, persistence);
+
+  const round2 = await createRound(2, persistence);
   const topResponse = await chooseTopIdeas(state, provider, skepticAgent, tracer, round2, persistence);
   state.rejectedIdeas = topResponse.rejectedIdeas;
   const rejectedTitles = new Set(topResponse.rejectedIdeas.map((idea) => idea.title));
@@ -308,11 +330,12 @@ export async function runCouncilDebate({
     provider.name,
   );
 
-  const round3 = await createRound(2, persistence);
+  const round3 = await createRound(3, persistence);
   const shortlistedIdeas = ideas
     .filter((idea) => topTitles.has(idea.title))
     .slice(0, 5);
   state.shortlist = shortlistedIdeas.length ? shortlistedIdeas : ideas.slice(0, 5);
+
   await persistence?.updateIdeaStatuses(
     state.shortlist.map((idea) => ({
       id: idea.id,
@@ -320,8 +343,10 @@ export async function runCouncilDebate({
       status: "shortlisted",
     })),
   );
+
   const shortlistResponse = await confirmShortlist(state, provider, builderAgent, tracer, round3, persistence);
   applyShortlistRefinements(state, shortlistResponse, round3, builderAgent);
+
   await recordMessage(
     state,
     persistence,
@@ -332,14 +357,28 @@ export async function runCouncilDebate({
     provider.name,
   );
 
-  const round4 = await createRound(3, persistence);
+  const round4 = await createRound(4, persistence);
   await runMarketSearchRound(state, round4, persistence, tracer);
+  const gateResult = await applyPostMarketSearchGate(state, round4, persistence, tracer);
 
-  const round5 = await createRound(4, persistence);
+  if (gateResult.decision === "reject_all") {
+    return finishRejectAllAfterMarketGate({
+      state,
+      provider,
+      enabledAgents,
+      judgeAgent,
+      scoredIdeas: gateResult.scoredIdeas,
+      persistence,
+      tracer,
+    });
+  }
+
+  const round5 = await createRound(5, persistence);
   await runInteractiveDebateRound(state, provider, enabledAgents, round5, persistence, tracer);
 
-  const round6 = await createRound(5, persistence);
+  const round6 = await createRound(6, persistence);
   let scoredIdeas = await scoreShortlist(state, provider, judgeAgent, tracer, round6, persistence);
+
   await persistence?.saveScores(scoredIdeas);
   await recordMessage(
     state,
@@ -351,8 +390,9 @@ export async function runCouncilDebate({
     provider.name,
   );
 
-  const round7 = await createRound(6, persistence);
+  const round7 = await createRound(7, persistence);
   const judgeDecision = await chooseWinner(state, provider, judgeAgent, scoredIdeas, tracer, round7, persistence);
+
   state.finalDecision = judgeDecision.finalDecision;
   state.finalDecisionReason = judgeDecision.reason;
   state.whyOthersLost = judgeDecision.whyOthersLost;
@@ -379,6 +419,7 @@ export async function runCouncilDebate({
           : "backup",
     })),
   );
+
   await recordMessage(
     state,
     persistence,
@@ -389,15 +430,17 @@ export async function runCouncilDebate({
     provider.name,
   );
 
-  const round8 = await createRound(7, persistence);
+  const round8 = await createRound(8, persistence);
   const report = await generateReport(state, provider, judgeAgent, winner, scoredIdeas, tracer, round8, persistence);
+
   await persistence?.saveFinalReport(report, winner);
   const finalReportMessage =
     judgeDecision.finalDecision === "build_now"
       ? `The final report is ready for ${winner.title}. It includes the Build Now decision, Day-One Sale Probability, score rationale, launch assets, architecture, pricing tiers, packaging checklist, and why the other top ideas lost.`
       : judgeDecision.finalDecision === "reject_all"
         ? `The final report rejects all shortlisted ideas. It explains which hidden-gap hard gates failed, what evidence Ahmad should collect next, and how to prompt the next council run.`
-      : `The final report is ready for ${winner.title}. It says "Validate first / Do not build yet" and includes the Pre-Sell Pack, Day-One Sale Probability, validation threshold, and why no idea cleared ${DAY_ONE_BUILD_THRESHOLD}.`;
+        : `The final report is ready for ${winner.title}. It says "Validate first / Do not build yet" and includes the Pre-Sell Pack, Day-One Sale Probability, validation threshold, and why no idea cleared ${DAY_ONE_BUILD_THRESHOLD}.`;
+
   await recordMessage(
     state,
     persistence,
@@ -786,6 +829,529 @@ async function callModelJSON<T>({
   }
 }
 
+function buildWorkflowDiscoveryBrief(run: CouncilRunInput, evidence: MarketEvidenceDraft[]) {
+  const buyer = (run.targetBuyer ?? "").trim() || "Unknown buyer";
+  const category = (run.productCategory ?? "").trim() || "No preferred category";
+  const notes = (run.notes ?? "").trim();
+  const evidenceNotes = (run.marketEvidenceNotes ?? "").trim();
+  const evidenceSummary = summarizeMarketEvidence(evidence);
+
+  const messyInputs = [
+    "Slack messages",
+    "email threads",
+    "screenshots",
+    "Loom videos",
+    "Google Docs",
+    "Notion pages",
+    "spreadsheets",
+    "meeting notes",
+    "call transcripts",
+    "client comments",
+    "invoices",
+    "proposals",
+    "contracts",
+    "approvals",
+    "delivery checklists",
+  ];
+  const outputArtifacts = [
+    "risk log",
+    "exception report",
+    "client-ready response",
+    "approval proof",
+    "change request record",
+    "decision trail",
+    "contradiction report",
+    "handoff summary",
+    "revenue leak warning",
+    "implementation checklist",
+  ];
+
+  return [
+    "# Workflow Discovery Brief",
+    `- user_goal: ${run.goal}`,
+    `- target_buyer: ${buyer}`,
+    `- preferred_category: ${category}`,
+    notes ? `- notes: ${notes}` : null,
+    evidenceNotes ? `- market_evidence_notes: ${evidenceNotes}` : null,
+    evidenceSummary?.strongestEvidence
+      ? `- strongest_market_evidence: ${evidenceSummary.strongestEvidence.title} (${evidenceSummary.strongestEvidence.signalType}, ${evidenceSummary.strongestEvidence.strengthScore}/10)`
+      : "- strongest_market_evidence: none provided",
+    "",
+    "Extract and fill these fields before naming products:",
+    "- buyer_type (niche, role, context)",
+    "- messy_inputs used today",
+    "- manual_workarounds (exact steps)",
+    "- painful_moments (where it breaks / risk happens)",
+    "- repeated_handoffs (who hands off to whom)",
+    "- hidden_cost_or_risk (money leak, rework, disputes, delays)",
+    "- artifact_produced (the output they need to show someone)",
+    "- validation_angle (how to validate fast on LinkedIn)",
+    "",
+    `Messy input examples: ${messyInputs.join(", ")}.`,
+    `Output artifact examples: ${outputArtifacts.join(", ")}.`,
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+}
+
+function applyIdeaQualityRewrites(
+  ideas: ProductIdeaDraft[],
+  state: DebateState,
+  tracer: RunDebugTracer | undefined,
+  round: RoundRecord | undefined,
+  agent: CouncilAgent,
+  provider: AIProvider,
+  model: string,
+) {
+  const buyerContext = (state.run.targetBuyer ?? "").trim();
+
+  return ideas.map((idea) => {
+    const buyer = idea.targetBuyer || buyerContext;
+    const originalTitle = idea.title;
+    const originalHadTitleRisk = hasBadProductTitleQuality(originalTitle, buyer);
+    let nextTitle = normalizeProductTitle(originalTitle, buyer);
+    const generic = isGenericProductTitle(originalTitle) || isGenericProductTitle(nextTitle);
+    let genericRiskReason = idea.genericRiskReason;
+
+    if (generic) {
+      const rewritten = rewriteGenericIdeaToWorkflowGap(
+        {
+          title: nextTitle,
+          targetBuyer: idea.targetBuyer,
+          manualWorkaroundToday: idea.manualWorkaroundToday,
+          messyInput: idea.messyInput,
+          outputArtifact: idea.outputArtifact,
+          painfulMoment: idea.painfulMoment,
+        },
+        buyerContext,
+      );
+      nextTitle = normalizeProductTitle(rewritten.title, buyer);
+      genericRiskReason = originalHadTitleRisk
+        ? "title stuffed with broad buyer list"
+        : "Generic title rewritten into workflow artifact + painful event form.";
+    } else if (originalHadTitleRisk) {
+      genericRiskReason = "title stuffed with broad buyer list";
+    }
+
+    if (nextTitle !== originalTitle) {
+      tracer?.addEvent({
+        step: "product_title_normalized",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model,
+        details: {
+          originalTitle: truncateText(originalTitle, 160),
+          normalizedTitle: truncateText(nextTitle, 120),
+          titleRisk: originalHadTitleRisk,
+        },
+      });
+    }
+
+    if (generic) {
+      tracer?.addEvent({
+        step: "generic_idea_rewritten",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model,
+        details: {
+          originalTitle: truncateText(originalTitle, 120),
+          rewrittenTitle: truncateText(nextTitle, 120),
+        },
+      });
+    }
+
+    return {
+      ...idea,
+      title: nextTitle,
+      targetBuyer: idea.targetBuyer || buyerContext,
+      genericRiskReason,
+    };
+  });
+}
+
+function dedupeIdeaCandidates(
+  ideas: ProductIdeaDraft[],
+  tracer: RunDebugTracer | undefined,
+  round: RoundRecord | undefined,
+  agent: CouncilAgent,
+  providerName: string,
+  stage: string,
+) {
+  const kept: ProductIdeaDraft[] = [];
+  const fingerprints: string[] = [];
+  const removed: Array<{ removed: ProductIdeaDraft; kept: ProductIdeaDraft; fingerprint: string }> = [];
+
+  for (const idea of ideas) {
+    const fingerprint = getIdeaFingerprint(idea);
+    const existingIndex = fingerprints.findIndex((existing) =>
+      areSimilarIdeaFingerprints(existing, fingerprint),
+    );
+
+    if (existingIndex === -1) {
+      kept.push(idea);
+      fingerprints.push(fingerprint);
+      continue;
+    }
+
+    const existing = kept[existingIndex];
+    const stronger = chooseStrongerIdea(existing, idea);
+    const weaker = stronger === existing ? idea : existing;
+    kept[existingIndex] = stronger;
+    fingerprints[existingIndex] = getIdeaFingerprint(stronger);
+    removed.push({ removed: weaker, kept: stronger, fingerprint });
+
+    tracer?.addEvent({
+      step: "duplicate_idea_removed",
+      status: "ok",
+      round: round?.title,
+      agent: agent.name,
+      provider: providerName,
+      details: {
+        stage,
+        removedTitle: truncateText(weaker.title, 140),
+        keptTitle: truncateText(stronger.title, 140),
+        fingerprint: truncateText(fingerprint, 220),
+      },
+    });
+  }
+
+  return { ideas: kept, removed };
+}
+
+async function runGenericIdeaKillSwitch(
+  state: DebateState,
+  provider: AIProvider,
+  agent: CouncilAgent,
+  tracer?: RunDebugTracer,
+  round?: RoundRecord,
+  persistence?: DebatePersistence,
+) {
+  const original = state.ideas;
+  const rejected: Array<{ title: string; reason: string }> = [];
+
+  const survivors = original.filter((idea) => {
+    if (isGenericProductTitle(idea.title)) {
+      rejected.push({ title: idea.title, reason: "Generic title" });
+      tracer?.addEvent({
+        step: "generic_idea_rejected",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model: modelForRound(agent, provider, round),
+        details: { title: truncateText(idea.title, 140), reason: "generic_title" },
+      });
+      return false;
+    }
+
+    if (!hasHiddenWorkflowSpecificity(idea)) {
+      rejected.push({
+        title: idea.title,
+        reason: "Missing manual workaround / messy input / output artifact / painful moment",
+      });
+      tracer?.addEvent({
+        step: "generic_idea_rejected",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model: modelForRound(agent, provider, round),
+        details: { title: truncateText(idea.title, 140), reason: "missing_structured_fields" },
+      });
+      return false;
+    }
+
+    const demo = (idea.beforeAfterDemo ?? "").trim();
+    if (demo.length < 18 || /save time|automate|streamline|manage/i.test(demo)) {
+      rejected.push({ title: idea.title, reason: "Vague before/after demo" });
+      tracer?.addEvent({
+        step: "generic_idea_rejected",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        model: modelForRound(agent, provider, round),
+        details: { title: truncateText(idea.title, 140), reason: "vague_demo" },
+      });
+      return false;
+    }
+
+    return true;
+  });
+
+  state.ideas = survivors;
+  await persistence?.updateIdeaStatuses(
+    rejected.map((item) => ({ title: item.title, status: "rejected" as const })),
+  );
+
+  if (round) {
+    await recordMessage(
+      state,
+      persistence,
+      round,
+      agent,
+      renderGenericKillSwitchMessage(original, survivors, rejected),
+      modelForRound(agent, provider, round),
+      provider.name,
+    );
+  }
+
+  if (survivors.length >= 5 || !round) {
+    return;
+  }
+
+  const model = modelForRound(agent, provider, round);
+  const { response } = await callModelJSON<IdeasResponse>({
+    state,
+    provider,
+    agent,
+    round,
+    tracer,
+    persistence,
+    mode: "idea_generation",
+    buildPrompt: (context) => `
+We removed too many generic ideas.
+
+Generate replacement ideas ONLY for the failed reasons below. Do not repeat rejected titles.
+
+Rejected reasons:
+${rejected
+  .slice(0, 12)
+  .map((item) => `- ${item.title}: ${item.reason}`)
+  .join("\n")}
+
+Requirements for replacements:
+- Weirdly specific hidden manual workflow.
+- Product title max 8 words. Use workflow artifact + painful event + niche buyer. Never paste a comma-separated buyer list into the title.
+- Must include exact buyer, manual workaround today, messy input, output artifact, painful moment.
+- Must include a sharp 30-second before/after demo.
+- Must include why broad SaaS is not enough.
+- Provide initial Exa search queries as concrete workflow/artifact phrases only, not raw goal fragments or full buyer lists.
+
+Workflow discovery brief:
+${state.workflowDiscoveryBrief ?? buildWorkflowDiscoveryBrief(state.run, state.marketEvidence)}
+
+Compact council context:
+${context}
+
+Return JSON only with up to ${Math.max(0, 5 - survivors.length)} ideas:
+{
+  "ideas": [
+    {
+      "title": "string",
+      "target_buyer": "string",
+      "manualWorkaroundToday": "string",
+      "messyInput": "string",
+      "outputArtifact": "string",
+      "painfulMoment": "string",
+      "broadSaasNotEnoughReason": "string",
+      "beforeAfterDemo": "string",
+      "why_buy_source_code": "string",
+      "initialSearchQueries": ["string"],
+      "build_complexity": "low | medium | high"
+    }
+  ]
+}
+`,
+    fallback: { ideas: [] },
+    expectedSchema: "IdeasResponse",
+    temperature: 0.45,
+    maxTokens: 2000,
+    okDetails: (response) => ({
+      ideasExtracted: Array.isArray(response.ideas) ? response.ideas.length : 0,
+    }),
+  });
+
+  tracer?.addEvent({
+    step: "model_call",
+    status: "ok",
+    round: round?.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: { replacementCount: Array.isArray(response.ideas) ? response.ideas.length : 0 },
+  });
+
+  const replacements = applyIdeaQualityRewrites(
+    normalizeIdeas(response.ideas),
+    state,
+    tracer,
+    round,
+    agent,
+    provider,
+    model,
+  ).filter((idea) => hasHiddenWorkflowSpecificity(idea));
+
+  state.ideas = dedupeIdeaCandidates(
+    uniqueByTitle([...state.ideas, ...replacements]),
+    tracer,
+    round,
+    agent,
+    provider.name,
+    "replacement_generation",
+  ).ideas.slice(0, 12);
+}
+
+function renderGenericKillSwitchMessage(
+  original: ProductIdeaDraft[],
+  survivors: ProductIdeaDraft[],
+  rejected: Array<{ title: string; reason: string }>,
+) {
+  return [
+    "# Round 1.5: Generic Idea Kill Switch",
+    "",
+    `Original ideas: ${original.length}`,
+    `Surviving ideas: ${survivors.length}`,
+    `Removed ideas: ${rejected.length}`,
+    "",
+    "Removed (deterministic reasons):",
+    ...rejected.slice(0, 12).map((item) => `- ${item.title}: ${item.reason}`),
+    "",
+    "Remaining:",
+    ...survivors.map((idea) => `- ${idea.title}`),
+  ].join("\n");
+}
+
+function uniqueStrings(items: string[]) {
+  return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+}
+
+function deterministicNicheDownIdea(idea: ProductIdeaDraft, buyerContext: string): ProductIdeaDraft {
+  const seed = titleHash(idea.title);
+  const buyer = chooseDifferent(
+    deriveBuyerNiches(idea.targetBuyer || buyerContext),
+    idea.targetBuyer,
+    seed,
+  );
+  const messyInput = chooseDifferent(
+    [
+      "Figma comments",
+      "Slack approval threads",
+      "Loom feedback videos",
+      "Google Doc scope notes",
+      "screenshot markups",
+      "email approval chains",
+    ],
+    idea.messyInput,
+    seed + 1,
+  );
+  const outputArtifact = chooseDifferent(
+    [
+      "contradiction log",
+      "approval reversal proof builder",
+      "feedback drift report",
+      "scope promise extractor",
+      "revision dispute pack",
+      "handoff assumption gap report",
+    ],
+    idea.outputArtifact,
+    seed + 2,
+  );
+  const painfulMoment = chooseDifferent(
+    [
+      "client reverses approval after signoff",
+      "feedback contradicts signed approval",
+      "hidden scope promise resurfaces",
+      "handoff assumption breaks delivery",
+      "screenshot revision dispute escalates",
+    ],
+    idea.painfulMoment || idea.pain,
+    seed + 3,
+  );
+  const narrowedTitle = normalizeProductTitle(
+    `${singularInputLabel(messyInput)} ${outputArtifact} for ${buyer}`,
+    buyer,
+  );
+  const changedFields = [
+    isMeaningfullyDifferent(idea.targetBuyer, buyer) ? "buyer_niche" : "",
+    isMeaningfullyDifferent(idea.messyInput, messyInput) ? "messy_input" : "",
+    isMeaningfullyDifferent(idea.outputArtifact, outputArtifact) ? "output_artifact" : "",
+    isMeaningfullyDifferent(idea.painfulMoment || idea.pain, painfulMoment) ? "painful_event" : "",
+  ].filter(Boolean);
+
+  const attempts = uniqueStrings([
+    narrowedTitle,
+    normalizeProductTitle(`${singularInputLabel(messyInput)} ${painfulMoment} for ${buyer}`, buyer),
+    normalizeProductTitle(`${outputArtifact} for ${buyer}`, buyer),
+  ]).slice(0, 3);
+
+  return {
+    ...idea,
+    targetBuyer: buyer,
+    messyInput,
+    outputArtifact,
+    painfulMoment,
+    title: narrowedTitle,
+    nicheDownAttempts: attempts,
+    initialSearchQueries: generateMarketSearchQueries({
+      ...idea,
+      title: narrowedTitle,
+      targetBuyer: buyer,
+      messyInput,
+      outputArtifact,
+      painfulMoment,
+    }).slice(0, 12),
+    genericRiskReason: "Niche-down pass applied after market gate rejection.",
+    risks: uniqueStrings([
+      ...idea.risks,
+      `Niche-down changed ${changedFields.length} fields: ${changedFields.join(", ")}.`,
+    ]),
+  };
+}
+
+function deriveBuyerNiches(buyer: string) {
+  const lower = buyer.toLowerCase();
+  const niches = [
+    /web\s+design|design|agenc/.test(lower) ? "Web Design Agencies" : "",
+    /dev|developer|technical|code|software/.test(lower) ? "Dev Shops" : "",
+    /brand|studio/.test(lower) ? "Branding Studios" : "",
+    /consult/.test(lower) ? "Consultants" : "",
+    /freelance|solo/.test(lower) ? "Freelancers" : "",
+    "Web Design Agencies",
+    "Dev Shops",
+    "Branding Studios",
+    "Consultants",
+    "Freelancers",
+  ].filter(Boolean);
+
+  return uniqueStrings(niches);
+}
+
+function chooseDifferent(options: string[], current: string | undefined, seed: number) {
+  const normalizedCurrent = normalizeComparable(current ?? "");
+  const available = options.filter((option) => normalizeComparable(option) !== normalizedCurrent);
+  const pool = available.length ? available : options;
+  return pool[Math.abs(seed) % pool.length] ?? options[0] ?? "Niche Buyers";
+}
+
+function singularInputLabel(input: string) {
+  return input
+    .replace(/\bcomments\b/i, "Comment")
+    .replace(/\bthreads\b/i, "Thread")
+    .replace(/\bvideos\b/i, "Video")
+    .replace(/\bnotes\b/i, "Note")
+    .replace(/\bmarkups\b/i, "Markup")
+    .replace(/\bchains\b/i, "Chain")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isMeaningfullyDifferent(left: string | undefined, right: string) {
+  return normalizeComparable(left ?? "") !== normalizeComparable(right);
+}
+
+function normalizeComparable(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function titleHash(value: string) {
+  return [...value].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+}
+
 function progressForRound(roundNumber: number, step: "model_call" | "message_saved") {
   const base = Math.max(0, roundNumber - 1) * 13;
   return Math.min(99, base + (step === "message_saved" ? 12 : 6));
@@ -849,6 +1415,23 @@ async function generateIdeas(
   const fallback = { ideas: expandMockIdeas() };
   const model = modelForRound(agent, provider, round);
 
+  const workflowDiscoveryBrief =
+    state.workflowDiscoveryBrief ?? buildWorkflowDiscoveryBrief(state.run, state.marketEvidence);
+  state.workflowDiscoveryBrief = workflowDiscoveryBrief;
+  tracer?.addEvent({
+    step: "workflow_discovery_brief_created",
+    status: "ok",
+    round: round?.title,
+    agent: agent.name,
+    provider: provider.name,
+    model,
+    details: {
+      buyer: truncateText(state.run.targetBuyer ?? "", 120),
+      preferredCategory: truncateText(state.run.productCategory ?? "", 80),
+      briefChars: workflowDiscoveryBrief.length,
+    },
+  });
+
   try {
     const { response } = await callModelJSON<IdeasResponse>({
       state,
@@ -859,16 +1442,31 @@ async function generateIdeas(
       persistence,
       mode: "idea_generation",
       buildPrompt: (context) => `
-You are opening the council. Generate exactly 12 full-source-code product ideas Ahmad can build and sell on LinkedIn.
-Use the provided market evidence when it exists. If it does not exist, label demand assumptions as unverified.
+You are opening the council.
 
-Source Code Market Agent requirements:
-- Suggest hidden, unsolved workflow problems (not broad app categories).
-- The pain must be real, time-wasting, and currently handled via manual workarounds.
-- Explicitly avoid obvious categories: proposal generator, chatbot, content generator, meeting summarizer, invoice generator, resume builder, social media calendar, email assistant, website audit tool, generic AI dashboard starter kits.
-- Each idea must include: the specific workflow, what people do manually today, and why existing tools are not enough.
-- Explain why buyers would buy the source code (ownership, customization, faster delivery) instead of just using a SaaS.
-- Keep each idea compact. No long feature lists in Round 1.
+Do NOT start by naming products.
+
+Step 1 (discovery): identify exactly 20 hidden manual workflows (not products) that match the buyer context.
+Each workflow MUST include:
+- exact buyer niche
+- messy input they deal with today (Slack/email/screenshots/Loom/Docs/Notion/spreadsheets/meeting notes/transcripts/etc)
+- exact manual workaround today
+- painful moment (where it breaks)
+- output artifact produced (risk log / proof / client-ready response / contradiction report / handoff summary / etc)
+- why broad SaaS is not enough
+- validation angle (how to validate quickly on LinkedIn)
+
+Step 2 (conversion): convert ONLY the best 12 workflows into product candidates.
+
+Hard bans:
+- Do not output generic titles like: Tracker, Manager, Dashboard, Portal, Generator, Analyzer, Automation Tool, System, Assistant.
+- If you use any banned word, the title MUST include a very specific workflow object AND buyer context.
+- If the title could be a common SaaS category, rewrite it until it is weirdly specific.
+- Product title max 8 words. Use workflow artifact + painful event + niche buyer. Never paste a comma-separated buyer list into the title.
+- Initial Exa search queries must be concrete artifact/workflow phrases. Do not include "They want...", "They need...", broad goals, or the full target buyer list.
+
+Workflow discovery brief (authoritative):
+${workflowDiscoveryBrief}
 
 Compact council context:
 ${context}
@@ -879,9 +1477,14 @@ Return JSON only:
     {
       "title": "string",
       "target_buyer": "string",
-      "one_sentence": "string",
+      "manualWorkaroundToday": "string",
+      "messyInput": "string",
+      "outputArtifact": "string",
+      "painfulMoment": "string",
+      "broadSaasNotEnoughReason": "string",
+      "beforeAfterDemo": "string",
       "why_buy_source_code": "string",
-      "demo_hook": "string",
+      "initialSearchQueries": ["string"],
       "build_complexity": "low | medium | high"
     }
   ]
@@ -896,7 +1499,16 @@ Return JSON only:
       }),
     });
 
-    return normalizeIdeas(response.ideas).slice(0, 12);
+    const normalized = normalizeIdeas(response.ideas).slice(0, 12);
+    const rewritten = applyIdeaQualityRewrites(normalized, state, tracer, round, agent, provider, model);
+    return dedupeIdeaCandidates(
+      rewritten,
+      tracer,
+      round,
+      agent,
+      provider.name,
+      "initial_generation",
+    ).ideas;
   } catch (error) {
     attachFailureMetadata(error, {
       failedStep: "model_call",
@@ -944,11 +1556,13 @@ Use market evidence as a constraint, not decoration.
 
 Skeptic Agent requirements:
 - Reject weak or generic ideas clearly.
+- Reject ideas that do not include: exact buyer, exact messy input, exact manual workaround today, exact output artifact, exact painful moment, and why broad SaaS is not enough.
 - Reject ideas when the actual tool already exists as a common SaaS or a common template/source-code kit.
 - Call out fantasy thinking, fake demand, weak demos, and generic AI wrappers.
 - Penalize ideas with no supporting evidence or only weak assumptions.
 - Return a shortlist of max 5 ideas.
 - Return rejected ideas max 6, with short reasons.
+- Do not use generic praise (no "strong balance"); every kept idea must have a concrete workflow reason.
 
 Compact council context:
 ${context}
@@ -1033,6 +1647,9 @@ Builder shortlist requirements:
 - Reference what the Skeptic Agent rejected in one compact sentence.
 - Reference market evidence if it exists, or state that assumptions remain unverified.
 - Add one required fix for each shortlisted idea before scoring.
+- Do not make the ideas broader. Narrow them to exactly one workflow step, one artifact, one failure moment.
+- If a title sounds like a common SaaS category, rewrite it into workflow artifact + painful event + niche buyer form.
+- Keep every product title to 8 words or fewer and do not include comma-separated buyer lists.
 - Keep max 5 ideas and do not introduce new products.
 
 Compact council context:
@@ -1099,6 +1716,34 @@ async function runMarketSearchRound(
 ) {
   const marketAgent = agentByKey("market-research");
   const provider = createMarketSearchProvider();
+  const deduped = dedupeIdeaCandidates(
+    state.shortlist,
+    tracer,
+    round,
+    marketAgent,
+    provider.name,
+    "before_market_search",
+  );
+  state.shortlist = deduped.ideas;
+  if (deduped.removed.length) {
+    state.rejectedIdeas.push(
+      ...deduped.removed.map(({ removed, kept }) => ({
+        title: removed.title,
+        reason: `Duplicate hidden workflow removed before market search. Kept stronger idea: ${kept.title}.`,
+        risks: [
+          "Duplicate normalized title/core workflow would pollute market evidence.",
+          "Do not score repeated copies of the same workflow.",
+        ],
+      })),
+    );
+    await persistence?.updateIdeaStatuses?.(
+      deduped.removed.map(({ removed }) => ({
+        id: removed.id,
+        title: removed.title,
+        status: "rejected" as const,
+      })),
+    );
+  }
   state.marketSearchStatus = "pending";
   tracer?.addEvent({
     step: "market_search_start",
@@ -1119,7 +1764,16 @@ async function runMarketSearchRound(
 
   const checks: ToolExistenceCheck[] = [];
   for (const idea of state.shortlist) {
-    const check = await runMarketExistenceCheck(idea, provider);
+    const check = await runMarketExistenceCheck(idea, provider, (event) => {
+      tracer?.addEvent({
+        step: event.step,
+        status: "ok",
+        round: round.title,
+        agent: marketAgent.name,
+        provider: provider.name,
+        details: event.details,
+      });
+    });
     checks.push(check);
     tracer?.addEvent({
       step: "market_search_result",
@@ -1129,6 +1783,19 @@ async function runMarketSearchRound(
       provider: provider.name,
       details: summarizeToolExistenceCheck(check),
     });
+    if (provider.name === "exa" && check.marketSearchStatus === "failed") {
+      tracer?.addEvent({
+        step: "market_search_provider_failed",
+        status: "failed",
+        round: round.title,
+        agent: marketAgent.name,
+        provider: "exa",
+        details: {
+          status: check.marketSearchStatus,
+          message: check.notes,
+        },
+      });
+    }
   }
 
   state.toolExistenceChecks = checks;
@@ -1160,6 +1827,401 @@ async function runMarketSearchRound(
     "market-search-provider",
     provider.name,
   );
+}
+
+async function applyPostMarketSearchGate(
+  state: DebateState,
+  round: RoundRecord,
+  persistence?: DebatePersistence,
+  tracer?: RunDebugTracer,
+): Promise<
+  | { decision: "continue"; scoredIdeas?: undefined }
+  | { decision: "reject_all"; scoredIdeas: ScoredProductIdea[] }
+> {
+  const marketAgent = agentByKey("market-research");
+  const originalShortlist = state.shortlist;
+  const initialEligible = originalShortlist.filter((idea) =>
+    marketGapPasses(findExistenceCheck(state, idea.title)),
+  );
+  const initialRejected = originalShortlist.filter(
+    (idea) => !initialEligible.some((eligible) => eligible.title === idea.title),
+  );
+
+  const provider = createMarketSearchProvider();
+  const eligibleIdeas: ProductIdeaDraft[] = [...initialEligible];
+  const rejectedIdeas: ProductIdeaDraft[] = [];
+
+  for (const idea of initialRejected) {
+    const check = findExistenceCheck(state, idea.title);
+    if (!check) {
+      rejectedIdeas.push(idea);
+      continue;
+    }
+
+    const narrowed = deterministicNicheDownIdea(idea, state.run.targetBuyer ?? "");
+    tracer?.addEvent({
+      step: "niche_down_attempted",
+      status: "ok",
+      round: round.title,
+      agent: marketAgent.name,
+      provider: provider.name,
+      details: {
+        originalTitle: truncateText(idea.title, 140),
+        narrowedTitle: truncateText(narrowed.title, 140),
+        changedBuyerNiche: narrowed.targetBuyer,
+        changedMessyInput: narrowed.messyInput,
+        changedOutputArtifact: narrowed.outputArtifact,
+        changedPainfulEvent: narrowed.painfulMoment,
+      },
+    });
+
+    tracer?.addEvent({
+      step: "niche_down_market_search_started",
+      status: "start",
+      round: round.title,
+      agent: marketAgent.name,
+      provider: provider.name,
+      details: { title: truncateText(narrowed.title, 140) },
+    });
+
+    const narrowedCheck = await runMarketExistenceCheck(narrowed, provider, (event) => {
+      tracer?.addEvent({
+        step: event.step,
+        status: "ok",
+        round: round.title,
+        agent: marketAgent.name,
+        provider: provider.name,
+        details: event.details,
+      });
+    });
+    state.toolExistenceChecks.push(narrowedCheck);
+
+    tracer?.addEvent({
+      step: "niche_down_market_search_result",
+      status: marketGapPasses(narrowedCheck) ? "ok" : "failed",
+      round: round.title,
+      agent: marketAgent.name,
+      provider: provider.name,
+      details: summarizeToolExistenceCheck(narrowedCheck) ?? {},
+    });
+
+    if (marketGapPasses(narrowedCheck)) {
+      eligibleIdeas.push(narrowed);
+      continue;
+    }
+
+    tracer?.addEvent({
+      step: "market_gate_rejected_after_niche_down",
+      status: "ok",
+      round: round.title,
+      agent: marketAgent.name,
+      provider: provider.name,
+      details: {
+        originalTitle: truncateText(idea.title, 140),
+        narrowedTitle: truncateText(narrowed.title, 140),
+        reason: marketGateRejectedReason(narrowedCheck),
+      },
+    });
+
+    rejectedIdeas.push(idea);
+  }
+
+  tracer?.addEvent({
+    step: "post_market_search_gate",
+    status: eligibleIdeas.length ? "ok" : "failed",
+    round: round.title,
+    agent: marketAgent.name,
+    provider: "market-search-gate",
+    details: {
+      originalShortlistCount: originalShortlist.length,
+      survivingIdeaCount: eligibleIdeas.length,
+      rejectedIdeaCount: rejectedIdeas.length,
+      rejectedIdeas: rejectedIdeas.map((idea) => ({
+        title: idea.title,
+        existenceCheck: summarizeToolExistenceCheck(findExistenceCheck(state, idea.title)),
+      })),
+    },
+  });
+
+  if (rejectedIdeas.length) {
+    state.rejectedIdeas.push(
+      ...rejectedIdeas.map((idea) => ({
+        title: idea.title,
+        reason: marketGateRejectedReason(findExistenceCheck(state, idea.title)),
+        risks: [
+          "Searched evidence found obvious similar tools or source-code kits.",
+          "The actual tool gap or source-code gap failed the 7/10 hard gate.",
+          "Do not continue this idea into scoring without a narrower hidden workflow.",
+        ],
+      })),
+    );
+  }
+
+  await persistence?.updateIdeaStatuses?.([
+    ...eligibleIdeas.map((idea) => ({
+      id: idea.id,
+      title: idea.title,
+      status: "shortlisted" as const,
+    })),
+    ...rejectedIdeas.map((idea) => ({
+      id: idea.id,
+      title: idea.title,
+      status: "rejected" as const,
+    })),
+  ]);
+
+  state.shortlist = eligibleIdeas;
+
+  if (eligibleIdeas.length) {
+    if (rejectedIdeas.length) {
+      await recordMessage(
+        state,
+        persistence,
+        round,
+        marketAgent,
+        renderPostMarketGateMessage(eligibleIdeas, rejectedIdeas, false),
+        "market-search-gate",
+        "market-search-gate",
+      );
+    }
+
+    return { decision: "continue" };
+  }
+
+  const scoredIdeas = createMarketGateRejectedScores(
+    originalShortlist,
+    state,
+  );
+  state.scoreHistory = scoredIdeas.map((idea) => ({
+    title: idea.title,
+    totalScore: idea.score.total_score,
+    score: idea.score,
+    explanations:
+      idea.scoreExplanations ?? normalizeScoreExplanations(undefined),
+    reason: idea.scoreReason ?? "",
+  }));
+  state.finalDecision = "reject_all";
+  state.finalDecisionReason =
+    "Reject all. Generate better hidden-gap ideas or add stronger market evidence. Searched market evidence found obvious similar tools or source-code kits for every shortlisted idea.";
+  state.whyOthersLost = scoredIdeas.map((idea) => ({
+    title: idea.title,
+    reason: marketGateRejectedReason(findExistenceCheck(state, idea.title)),
+  }));
+
+  await recordMessage(
+    state,
+    persistence,
+    round,
+    marketAgent,
+    renderPostMarketGateMessage([], rejectedIdeas, true),
+    "market-search-gate",
+    "market-search-gate",
+  );
+
+  return { decision: "reject_all", scoredIdeas };
+}
+
+async function finishRejectAllAfterMarketGate({
+  state,
+  provider,
+  enabledAgents,
+  judgeAgent,
+  scoredIdeas,
+  persistence,
+  tracer,
+}: {
+  state: DebateState;
+  provider: AIProvider;
+  enabledAgents: CouncilAgent[];
+  judgeAgent: CouncilAgent;
+  scoredIdeas: ScoredProductIdea[];
+  persistence?: DebatePersistence;
+  tracer?: RunDebugTracer;
+}): Promise<DebateArtifacts> {
+  const sorted = sortByScore(scoredIdeas);
+  const highestRejected = sorted[0];
+
+  await persistence?.saveScores(scoredIdeas);
+  await persistence?.updateIdeaStatuses(
+    scoredIdeas.map((idea) => ({
+      id: idea.id,
+      title: idea.title,
+      status: "rejected",
+    })),
+  );
+
+  const round8 = await createRound(7, persistence);
+  const report = createDeterministicReport(
+    state.run,
+    highestRejected,
+    createReportContext(state, scoredIdeas),
+    {
+      onBetterDirectionGenerated: (direction) => {
+        tracer?.addEvent({
+          step: "better_direction_generated",
+          status: "ok",
+          round: round8.title,
+          agent: judgeAgent.name,
+          provider: provider.name,
+          details: {
+            title: direction.title,
+            queries: direction.queries,
+          },
+        });
+      },
+    },
+  );
+  await persistence?.saveFinalReport(report, highestRejected);
+
+  await recordMessage(
+    state,
+    persistence,
+    round8,
+    judgeAgent,
+    "Reject all. Generate better hidden-gap ideas or add stronger market evidence. The final report explains that searched market evidence found obvious similar tools or source-code kits for every shortlisted idea, so the council stopped before interactive debate and scoring.",
+    modelForRound(judgeAgent, provider, round8),
+    provider.name,
+  );
+
+  await persistence?.updateRunProgress?.({
+    currentRound: round8.title,
+    currentAgent: judgeAgent.name,
+    currentStep: "Council rejected all after market search",
+    currentProvider: provider.name,
+    currentModel: modelForRound(judgeAgent, provider, round8),
+    progressPercent: 100,
+  });
+  await persistence?.markRunStatus?.("completed");
+  tracer?.completeStep("update_run_completed", {
+    status: "completed",
+    finalDecision: "reject_all",
+    reason: "post_market_search_gate",
+  });
+  tracer?.completeStep("start_debate_runner", { status: "completed" });
+
+  return {
+    run: state.run,
+    agents: enabledAgents,
+    ideas: state.ideas,
+    marketEvidence: state.marketEvidence,
+    toolExistenceChecks: state.toolExistenceChecks,
+    shortlistedIdeas: state.shortlist,
+    scoredIdeas,
+    winner: highestRejected,
+    report,
+  };
+}
+
+function marketGapPasses(check?: ToolExistenceCheck) {
+  return Boolean(
+    check &&
+      check.marketSearchStatus === "completed" &&
+      check.actualToolGapScore >= 7 &&
+      check.sourceCodeGapScore >= 7,
+  );
+}
+
+function marketGateRejectedReason(check?: ToolExistenceCheck) {
+  if (!check) {
+    return "No completed market search check was available, so the idea failed the market evidence gate.";
+  }
+
+  return [
+    `Market search status: ${check.marketSearchStatus}.`,
+    `Common category risk: ${check.commonCategoryRisk}.`,
+    `Actual tool gap: ${check.actualToolGapScore}/10.`,
+    `Source-code gap: ${check.sourceCodeGapScore}/10.`,
+    `Similar tools found: ${check.similarSaaSTools.length}.`,
+    `Similar source-code kits found: ${check.similarSourceCodeKits.length}.`,
+  ].join(" ");
+}
+
+function createMarketGateRejectedScores(
+  ideas: ProductIdeaDraft[],
+  state: DebateState,
+): ScoredProductIdea[] {
+  const localScores = scoreIdeasLocally(ideas, state.marketEvidence);
+  const localExplanations = explainScoresLocally(ideas, state.marketEvidence);
+
+  return ideas.map((idea, index) => {
+    const check = findExistenceCheck(state, idea.title);
+    const localScore = localScores[index];
+    const actualToolGap = check
+      ? Math.min(localScore.actual_tool_gap, check.actualToolGapScore)
+      : Math.min(localScore.actual_tool_gap, 4);
+    const sourceCodeGap = check
+      ? Math.min(localScore.source_code_gap, check.sourceCodeGapScore)
+      : Math.min(localScore.source_code_gap, 4);
+    const titleQualityBad =
+      hasBadProductTitleQuality(idea.title, idea.targetBuyer) ||
+      idea.genericRiskReason === "title stuffed with broad buyer list";
+    const hiddenWorkflowSpecificity =
+      titleQualityBad
+        ? Math.min(localScore.hidden_workflow_specificity, 5)
+        : check?.commonCategoryRisk === "high"
+        ? Math.min(localScore.hidden_workflow_specificity, 5)
+        : localScore.hidden_workflow_specificity;
+    const score = normalizeScore({
+      ...localScore,
+      productIdeaId: idea.id,
+      actual_tool_gap: actualToolGap,
+      source_code_gap: sourceCodeGap,
+      linkedin_demo_strength: titleQualityBad
+        ? Math.min(localScore.linkedin_demo_strength, 6)
+        : localScore.linkedin_demo_strength,
+      hidden_workflow_specificity: hiddenWorkflowSpecificity,
+      price_believability: Math.min(localScore.price_believability, 6),
+    });
+    const scoreExplanations = normalizeScoreExplanations({
+      ...localExplanations[index],
+      actual_tool_gap: `Failed the post-market-search gate. ${marketGateRejectedReason(check)}`,
+      source_code_gap: `Failed the source-code-kit gate. ${marketGateRejectedReason(check)}`,
+      hidden_workflow_specificity:
+        titleQualityBad
+          ? "Title was stuffed with a broad buyer list, so hidden workflow specificity is capped until the title is narrowed."
+          : check?.commonCategoryRisk === "high"
+          ? "Searched evidence shows a crowded/common category, so this is not specific enough to continue."
+          : localExplanations[index]?.hidden_workflow_specificity,
+    });
+
+    return {
+      ...idea,
+      genericRiskReason: titleQualityBad
+        ? "title stuffed with broad buyer list"
+        : idea.genericRiskReason,
+      score,
+      scoreExplanations,
+      scoreReason:
+        "Rejected immediately after market search because the searched evidence did not clear actual_tool_gap and source_code_gap hard gates.",
+      lostReason: marketGateRejectedReason(check),
+    };
+  });
+}
+
+function renderPostMarketGateMessage(
+  eligibleIdeas: ProductIdeaDraft[],
+  rejectedIdeas: ProductIdeaDraft[],
+  rejectedAll: boolean,
+) {
+  const headline = rejectedAll
+    ? "Reject all. Generate better hidden-gap ideas or add stronger market evidence."
+    : "Market search gate removed crowded ideas before scoring.";
+
+  return [
+    `# Post-Market-Search Gate`,
+    "",
+    headline,
+    "",
+    `Rejected by market gate: ${rejectedIdeas.length}`,
+    ...rejectedIdeas.map((idea) => `- ${idea.title}`),
+    "",
+    `Remaining shortlist: ${eligibleIdeas.length}`,
+    ...eligibleIdeas.map((idea) => `- ${idea.title}`),
+    "",
+    rejectedAll
+      ? "The council stopped before interactive debate and model scoring because every shortlisted idea failed actual_tool_gap or source_code_gap after searched evidence."
+      : "Only ideas that cleared actual_tool_gap >= 7 and source_code_gap >= 7 continue.",
+  ].join("\n");
 }
 
 async function runInteractiveDebateRound(
@@ -1757,7 +2819,21 @@ async function generateReport(
   persistence?: DebatePersistence,
 ) {
   const reportContext = createReportContext(state, scoredIdeas);
-  const fallback = createDeterministicReport(state.run, winner, reportContext);
+  const fallback = createDeterministicReport(state.run, winner, reportContext, {
+    onBetterDirectionGenerated: (direction) => {
+      tracer?.addEvent({
+        step: "better_direction_generated",
+        status: "ok",
+        round: round?.title,
+        agent: agent.name,
+        provider: provider.name,
+        details: {
+          title: direction.title,
+          queries: direction.queries,
+        },
+      });
+    },
+  });
   const fallbackFinalDecision = fallback.finalDecision ?? "validate_first";
   const model = modelForRound(agent, provider, round);
 
@@ -1922,6 +2998,13 @@ Market Research Agent:
 - Prove whether this product already exists in searched evidence.
 - Name competitors, alternatives, and source-code kits when present.
 - Lower actual_tool_gap and source_code_gap when searched evidence shows similar products.
+- Classify the searched evidence into:
+  - exact same workflow
+  - adjacent broad SaaS
+  - source-code/template exists
+  - manual workaround content exists (spreadsheets/SOP/templates/blog posts)
+  - no close result found in searched evidence
+- Explain whether the idea is: copycat, too broad, niche-down possible, or hidden-gap candidate.
 - Do not let the council choose copycat ideas.`;
     case "buyer-intent":
       return `
@@ -2358,6 +3441,13 @@ function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft
       why_buy_source_code?: string;
       demo_hook?: string;
       build_complexity?: string;
+      manualWorkaroundToday?: string;
+      messyInput?: string;
+      outputArtifact?: string;
+      painfulMoment?: string;
+      broadSaasNotEnoughReason?: string;
+      beforeAfterDemo?: string;
+      initialSearchQueries?: string[];
     };
 
     return {
@@ -2373,6 +3463,21 @@ function normalizeIdeas(ideas: ProductIdeaDraft[] | undefined): ProductIdeaDraft
       idea.whyBuySourceCode ?? raw.why_buy_source_code,
       "The source code can be customized, rebranded, and resold as a service foundation.",
     ),
+    manualWorkaroundToday: safeText(
+      (idea as ProductIdeaDraft).manualWorkaroundToday ?? raw.manualWorkaroundToday,
+      "",
+    ),
+    messyInput: safeText((idea as ProductIdeaDraft).messyInput ?? raw.messyInput, ""),
+    outputArtifact: safeText((idea as ProductIdeaDraft).outputArtifact ?? raw.outputArtifact, ""),
+    painfulMoment: safeText((idea as ProductIdeaDraft).painfulMoment ?? raw.painfulMoment, ""),
+    broadSaasNotEnoughReason: safeText(
+      (idea as ProductIdeaDraft).broadSaasNotEnoughReason ?? raw.broadSaasNotEnoughReason,
+      "",
+    ),
+    beforeAfterDemo: safeText((idea as ProductIdeaDraft).beforeAfterDemo ?? raw.beforeAfterDemo, ""),
+    initialSearchQueries: Array.isArray(raw.initialSearchQueries)
+      ? raw.initialSearchQueries
+      : (idea as ProductIdeaDraft).initialSearchQueries,
     mvpFeatures: safeList(idea.mvpFeatures).length
       ? safeList(idea.mvpFeatures)
       : [safeText(raw.demo_hook, "Demo the core buyer workflow end to end.")],
@@ -2434,16 +3539,18 @@ function marketChecksAsEvidenceDrafts(checks: ToolExistenceCheck[]): MarketEvide
     title: `Market Search Reality Check: ${check.ideaTitle}`,
     content: renderMarketSearchSummary(check),
     signalType: check.exactToolExists || check.commonCategoryRisk === "high" ? "competitor" : "market_gap_check",
-    strengthScore: check.confidence,
+    strengthScore: normalizeStrengthScore(check.confidence),
   }));
 }
 
 function renderMarketSearchSummary(check: ToolExistenceCheck) {
+  const classified = classifyMarketResults(check);
   return [
     `market_search_status: ${check.marketSearchStatus}`,
     `exact_tool_exists_in_searched_results: ${check.exactToolExists ? "yes" : "no/uncertain"}`,
     `similar_saas_tools: ${check.similarSaaSTools.length}`,
     `similar_source_code_kits: ${check.similarSourceCodeKits.length}`,
+    `competitor_classification: exact_same_workflow=${classified.exactSameWorkflow}; adjacent_broad_saas=${classified.adjacentBroadSaaS}; source_code_or_template=${classified.sourceCodeOrTemplate}; manual_workaround_content=${classified.manualWorkaroundContent}; no_close_result=${classified.noCloseResult}`,
     `common_category_risk: ${check.commonCategoryRisk}`,
     `actual_tool_gap_score: ${check.actualToolGapScore}/10`,
     `source_code_gap_score: ${check.sourceCodeGapScore}/10`,
@@ -2455,9 +3562,47 @@ function renderMarketSearchSummary(check: ToolExistenceCheck) {
   ].join("\n");
 }
 
+function classifyMarketResults(check: ToolExistenceCheck) {
+  const hasResults =
+    check.similarSaaSTools.length > 0 ||
+    check.similarSourceCodeKits.length > 0 ||
+    check.evidence.some((item) => item.results?.length);
+
+  const manualContent = check.evidence
+    .flatMap((item) => item.results)
+    .filter(Boolean)
+    .some((result) => /template|spreadsheet|google\s*sheets|notion|sop|checklist|download|pdf|doc\b|\bforms?\b/i.test(`${result.title} ${result.url} ${result.snippet}`));
+
+  const adjacentBroad =
+    check.commonCategoryRisk !== "low" ||
+    check.evidence
+      .flatMap((item) => item.results)
+      .filter(Boolean)
+      .some((result) =>
+        /(crm|project management|task management|client portal|approval workflow|feedback tracker|decision log|risk tracker|communication tracker|helpdesk|ticketing)/i.test(
+          `${result.title} ${result.snippet}`,
+        ),
+      );
+
+  const exactSameWorkflow = Boolean(check.exactToolExists);
+  const sourceCodeOrTemplate = check.similarSourceCodeKits.length > 0;
+  const noCloseResult = !hasResults;
+
+  return {
+    exactSameWorkflow,
+    adjacentBroadSaaS: adjacentBroad,
+    sourceCodeOrTemplate,
+    manualWorkaroundContent: manualContent && !exactSameWorkflow,
+    noCloseResult,
+  };
+}
+
 function renderMarketSearchRoundMessage(checks: ToolExistenceCheck[]) {
   return `# Market Search / Existence Check\n\n${checks
-    .map((check) => `## ${check.ideaTitle}\n- Market search status: ${check.marketSearchStatus}\n- Exact tool exists in searched results: ${check.exactToolExists ? "yes" : "no/uncertain"}\n- Similar SaaS/tools found: ${check.similarSaaSTools.length}\n- Similar source-code kits/templates found: ${check.similarSourceCodeKits.length}\n- Common category risk: ${check.commonCategoryRisk}\n- Actual tool gap cap: ${check.actualToolGapScore}/10\n- Source-code gap cap: ${check.sourceCodeGapScore}/10\n- Confidence: ${check.confidence}/100\n- Queries used: ${check.evidence.map((item) => `"${item.query}"`).join(", ")}\n- Top similar tools: ${check.similarSaaSTools.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious tools found in searched results."}\n- Top source-code kits: ${check.similarSourceCodeKits.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious source-code kits found in searched results."}\n- Notes: ${check.notes}`)
+    .map((check) => {
+      const classified = classifyMarketResults(check);
+      return `## ${check.ideaTitle}\n- Market search status: ${check.marketSearchStatus}\n- Evidence classification: exact_same_workflow=${classified.exactSameWorkflow ? "yes" : "no"}; adjacent_broad_saas=${classified.adjacentBroadSaaS ? "yes" : "no"}; source_code_or_template=${classified.sourceCodeOrTemplate ? "yes" : "no"}; manual_workaround_content=${classified.manualWorkaroundContent ? "yes" : "no"}; no_close_result=${classified.noCloseResult ? "yes" : "no"}\n- Exact tool exists in searched results: ${check.exactToolExists ? "yes" : "no/uncertain"}\n- Similar SaaS/tools found: ${check.similarSaaSTools.length}\n- Similar source-code kits/templates found: ${check.similarSourceCodeKits.length}\n- Common category risk: ${check.commonCategoryRisk}\n- Actual tool gap cap: ${check.actualToolGapScore}/10\n- Source-code gap cap: ${check.sourceCodeGapScore}/10\n- Confidence: ${check.confidence}/100\n- Queries used: ${check.evidence.map((item) => `"${item.query}"`).join(", ")}\n- Top similar tools: ${check.similarSaaSTools.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious tools found in searched results."}\n- Top source-code kits: ${check.similarSourceCodeKits.slice(0, 5).map((result) => `${result.title} — ${result.url}`).join("; ") || "No obvious source-code kits found in searched results."}\n- Notes: ${check.notes}`;
+    })
     .join("\n\n")}\n\nSafety language: these checks mean "not found in searched market evidence," not "does not exist in the world." Build now is blocked when market search fails, confidence is low, exact tools are obvious, or category risk is high.`;
 }
 

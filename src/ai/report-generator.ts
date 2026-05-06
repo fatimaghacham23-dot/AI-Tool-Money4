@@ -1,4 +1,6 @@
 import { DAY_ONE_BUILD_THRESHOLD, SCORING_RUBRIC } from "@/ai/scoring";
+import { normalizeProductTitle } from "@/ai/idea-quality";
+import { generateMarketSearchQueries } from "@/ai/market-gap-scoring";
 import type {
   CouncilRunInput,
   FinalDecision,
@@ -44,6 +46,10 @@ export type ReportContext = {
   whyOthersLost?: Array<{ title: string; reason: string }>;
   finalDecision?: FinalDecision;
   finalDecisionReason?: string;
+};
+
+type ReportDebugOptions = {
+  onBetterDirectionGenerated?: (direction: { title: string; queries: string[] }) => void;
 };
 
 export function buildReportPrompt(
@@ -118,12 +124,13 @@ export function createDeterministicReport(
   run: CouncilRunInput,
   winner: ScoredProductIdea,
   context: ReportContext = {},
+  options: ReportDebugOptions = {},
 ): FinalReportDraft {
   const finalDecision = context.finalDecision ?? inferFinalDecision(winner);
   const dayOneSaleProbability = winner.score.total_score;
 
   if (finalDecision === "reject_all") {
-    return createRejectAllReport(run, winner, context, dayOneSaleProbability);
+    return createRejectAllReport(run, winner, context, dayOneSaleProbability, options);
   }
 
   const decisionLabel = finalDecisionLabel(finalDecision);
@@ -430,6 +437,263 @@ ${codexPrompt}
   };
 }
 
+function analyzeRejectAllContext(context: ReportContext) {
+  const rejected = context.rejectedIdeas ?? [];
+  const marketItems = (context.marketEvidence ?? []).filter((item) => item.sourceType === "market_search");
+
+  const tooGeneric = rejected
+    .filter((idea) => /generic|too generic|broad|vague/i.test(`${idea.reason} ${(idea.risks ?? []).join(" ")}`))
+    .map((idea) => `${idea.title}: ${idea.reason}`);
+
+  const tooCrowded = rejected
+    .filter((idea) => /tool exists|crowded|competitor|template|kit|market/i.test(`${idea.reason} ${(idea.risks ?? []).join(" ")}`))
+    .map((idea) => `${idea.title}: ${idea.reason}`);
+
+  const killingEvidence = marketItems
+    .flatMap((item) => {
+      const title = item.title.replace(/^Market Search Reality Check:\s*/i, "").trim();
+      const lines = (item.content ?? "").split("\n").map((line) => line.trim());
+      const tools = lines.find((line) => line.startsWith("similar_tools_found:"))?.replace(/^similar_tools_found:\s*/i, "");
+      const kits = lines.find((line) => line.startsWith("source_code_kits_found:"))?.replace(/^source_code_kits_found:\s*/i, "");
+      const exact = lines.find((line) => line.startsWith("exact_tool_exists_in_searched_results:"))?.replace(/^exact_tool_exists_in_searched_results:\s*/i, "");
+      const risk = lines.find((line) => line.startsWith("common_category_risk:"))?.replace(/^common_category_risk:\s*/i, "");
+
+      const evidenceLines: string[] = [];
+      if (exact) evidenceLines.push(`exact=${exact}`);
+      if (risk) evidenceLines.push(`category_risk=${risk}`);
+      if (tools && tools !== "none in searched results") evidenceLines.push(`tools=${tools}`);
+      if (kits && kits !== "none in searched results") evidenceLines.push(`kits=${kits}`);
+      if (!evidenceLines.length) return [];
+
+      return [`${title}: ${evidenceLines.join("; ")}`];
+    })
+    .slice(0, 12);
+
+  const generationFailedSummary =
+    tooGeneric.length && tooCrowded.length
+      ? "Idea generation produced a mix of generic titles/structures AND market-crowded ideas, so the run had nothing weirdly-specific that also cleared searched evidence."
+      : tooGeneric.length
+        ? "Idea generation produced too many generic titles/structures that did not clearly name a hidden manual workflow (buyer + messy input + workaround + artifact + painful moment)."
+        : tooCrowded.length
+          ? "Idea generation was specific enough, but searched market evidence still showed obvious adjacent/exact tools or source-code kits for the shortlisted workflows."
+          : "The run failed hard gates (tool gap / specificity / workaround pain). Improve the upstream workflow discovery inputs and rerun.";
+
+  return {
+    generationFailedSummary,
+    tooGeneric,
+    tooCrowded,
+    killingEvidence,
+  };
+}
+
+function createBetterHiddenWorkflowDirections(
+  context: ReportContext,
+  onGenerated?: ReportDebugOptions["onBetterDirectionGenerated"],
+) {
+  const seeds = uniqueByTitle([
+    ...(context.scoredIdeas ?? []),
+    ...(context.shortlistedIdeas ?? []),
+  ]);
+  const rejectedReasons = new Map(
+    (context.rejectedIdeas ?? []).map((idea) => [normalizeKey(idea.title), idea.reason]),
+  );
+  const failedTitles = new Set([
+    ...(context.rejectedIdeas ?? []).map((idea) => normalizeKey(idea.title)),
+    ...(context.scoredIdeas ?? []).map((idea) => normalizeKey(idea.title)),
+    ...(context.shortlistedIdeas ?? []).map((idea) => normalizeKey(idea.title)),
+  ]);
+
+  const directions = seeds.map((idea, index) =>
+    createBetterWorkflowDirection(
+      idea,
+      rejectedReasons.get(normalizeKey(idea.title)),
+      failedTitles,
+      index,
+      onGenerated,
+    ),
+  );
+
+  if (directions.length < 5) {
+    const fallbackSeeds = createFallbackDirectionSeeds(5 - directions.length);
+    directions.push(
+      ...fallbackSeeds.map((idea, index) =>
+        createBetterWorkflowDirection(
+          idea,
+          "Previous ideas were too broad, duplicated, or market-crowded.",
+          failedTitles,
+          directions.length + index,
+          onGenerated,
+        ),
+      ),
+    );
+  }
+
+  return directions.slice(0, 5);
+}
+
+function createBetterWorkflowDirection(
+  seed: ProductIdeaDraft & { lostReason?: string },
+  failureReason: string | undefined,
+  failedTitles: Set<string>,
+  index: number,
+  onGenerated?: ReportDebugOptions["onBetterDirectionGenerated"],
+) {
+  const buyer = exactBuyerNiche(seed.targetBuyer, index);
+  const messyInput = exactOrFallback(seed.messyInput, directionMessyInputFallback(index));
+  const manualWorkaround = exactOrFallback(
+    seed.manualWorkaroundToday,
+    directionManualWorkaroundFallback(messyInput, index),
+  );
+  const outputArtifact = exactOrFallback(seed.outputArtifact, directionArtifactFallback(index));
+  const painfulMoment = exactOrFallback(seed.painfulMoment || seed.pain, directionPainfulFallback(index));
+  let title = normalizeProductTitle(
+    `${singularInputLabel(messyInput)} ${outputArtifact} for ${buyer}`,
+    buyer,
+  );
+
+  if (failedTitles.has(normalizeKey(title))) {
+    title = normalizeProductTitle(
+      `${singularInputLabel(messyInput)} ${painfulMoment} ${outputArtifact} for ${buyer}`,
+      buyer,
+    );
+  }
+
+  if (failedTitles.has(normalizeKey(title))) {
+    title = normalizeProductTitle(
+      `${singularInputLabel(messyInput)} ${directionArtifactFallback(index + 1)} for ${buyer}`,
+      buyer,
+    );
+  }
+
+  const directionIdea: ProductIdeaDraft = {
+    ...seed,
+    title,
+    targetBuyer: buyer,
+    messyInput,
+    manualWorkaroundToday: manualWorkaround,
+    outputArtifact,
+    painfulMoment,
+    initialSearchQueries: [],
+  };
+  const queries = generateMarketSearchQueries(directionIdea).slice(0, 6);
+  onGenerated?.({ title, queries });
+
+  return [
+    `- ${title}`,
+    `  Buyer: ${buyer}`,
+    `  Messy input: ${messyInput}`,
+    `  Manual workaround: ${manualWorkaround}`,
+    `  Output artifact: ${outputArtifact}`,
+    `  Painful moment: ${painfulMoment}`,
+    `  Why previous ideas failed: ${failureReason || seed.lostReason || seed.genericRiskReason || "The prior direction was too broad, duplicated, or crowded in searched market evidence."}`,
+    "  First Exa queries to test:",
+    ...queries.map((query) => `  - ${query}`),
+  ].join("\n");
+}
+
+function createFallbackDirectionSeeds(count: number): ProductIdeaDraft[] {
+  return Array.from({ length: count }, (_item, index) => ({
+    title: directionArtifactFallback(index),
+    description: "Fresh hidden workflow direction generated after reject_all.",
+    targetBuyer: directionBuyerFallback(index),
+    pain: directionPainfulFallback(index),
+    whyBuySourceCode: "A narrow source-code package can be customized for a repeated client delivery workflow.",
+    manualWorkaroundToday: directionManualWorkaroundFallback(directionMessyInputFallback(index), index),
+    messyInput: directionMessyInputFallback(index),
+    outputArtifact: directionArtifactFallback(index),
+    painfulMoment: directionPainfulFallback(index),
+    broadSaasNotEnoughReason: "Broad tools store the input but do not produce this exact dispute-proof artifact.",
+    beforeAfterDemo: "Paste the messy input, show the contradiction, export the buyer-ready artifact.",
+    mvpFeatures: [],
+    fullFeatures: [],
+    pricingIdea: "$149-$499 source-code license",
+    risks: [],
+  }));
+}
+
+function exactOrFallback(value: string | undefined, fallback: string) {
+  return value?.trim() || fallback;
+}
+
+function exactBuyerNiche(value: string | undefined, index: number) {
+  const buyer = value?.trim();
+  if (!buyer) {
+    return directionBuyerFallback(index);
+  }
+
+  if (buyer.includes(",") || buyer.split(/\s+/).length > 4) {
+    return directionBuyerFallback(index);
+  }
+
+  return buyer;
+}
+
+function directionBuyerFallback(index: number) {
+  return [
+    "Web Design Agencies",
+    "Dev Shops",
+    "Branding Studios",
+    "Consultants",
+    "Freelancers",
+  ][index % 5];
+}
+
+function directionMessyInputFallback(index: number) {
+  return [
+    "Figma comments",
+    "Slack approval threads",
+    "Loom feedback videos",
+    "Google Doc scope notes",
+    "screenshot markups",
+  ][index % 5];
+}
+
+function directionArtifactFallback(index: number) {
+  return [
+    "contradiction log",
+    "approval reversal proof builder",
+    "feedback drift report",
+    "scope promise extractor",
+    "revision dispute pack",
+  ][index % 5];
+}
+
+function directionPainfulFallback(index: number) {
+  return [
+    "client reverses approval after signoff",
+    "feedback contradicts signed approval",
+    "Loom feedback drifts from the agreed scope",
+    "a Google Doc scope promise resurfaces late",
+    "screenshot revision dispute escalates",
+  ][index % 5];
+}
+
+function directionManualWorkaroundFallback(messyInput: string, index: number) {
+  return [
+    `copy ${messyInput} into a spreadsheet and manually tag contradictions`,
+    `paste ${messyInput} into a doc and assemble proof for the client`,
+    `skim ${messyInput} by hand before writing a scope-change reply`,
+    `compare ${messyInput} against old approvals before delivery`,
+    `turn ${messyInput} into screenshots and notes for a dispute call`,
+  ][index % 5];
+}
+
+function singularInputLabel(input: string) {
+  return input
+    .replace(/\bcomments\b/i, "Comment")
+    .replace(/\bthreads\b/i, "Thread")
+    .replace(/\bvideos\b/i, "Video")
+    .replace(/\bnotes\b/i, "Note")
+    .replace(/\bmarkups\b/i, "Markup")
+    .replace(/\bchains\b/i, "Chain")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 
 function renderMarketSearchRealityCheck(evidence: MarketEvidenceDraft[] | undefined) {
   const marketItems = (evidence ?? []).filter((item) => item.sourceType === "market_search");
@@ -464,6 +728,7 @@ function createRejectAllReport(
   highestScoredIdea: ScoredProductIdea,
   context: ReportContext,
   dayOneSaleProbability: number,
+  options: ReportDebugOptions = {},
 ): FinalReportDraft {
   const scoredIdeas = uniqueByTitle([
     highestScoredIdea,
@@ -482,6 +747,11 @@ function createRejectAllReport(
     "A problem where existing SaaS tools are too broad, too expensive, too hard to customize, or do not sell source-code ownership.",
     "A buyer segment with urgent language, visible complaints, and willingness to pay for implementation shortcuts.",
   ];
+  const rejectionAnalysis = analyzeRejectAllContext(context);
+  const betterDirections = createBetterHiddenWorkflowDirections(
+    context,
+    options.onBetterDirectionGenerated,
+  );
   const evidenceToCollect = [
     "Five LinkedIn posts or comments where the target buyer complains about the exact workflow in their own words.",
     "Three examples of current manual workarounds, including screenshots or quoted process notes when possible.",
@@ -496,6 +766,21 @@ Reject all. Generate better hidden-gap ideas or add stronger market evidence.
 
 ## Why No Idea Passed
 The scored shortlist did not produce a product with enough actual tool gap, hidden workflow specificity, and manual workaround pain to deserve build time or even a validation push. The highest-scored rejected idea was ${highestScoredIdea.title} at ${dayOneSaleProbability}/100, but the council should not treat it as a winner.
+
+## Why Generation Failed (Upstream)
+${rejectionAnalysis.generationFailedSummary}
+
+## Ideas Too Generic (Killed Before/Regardless of Market)
+${rejectionAnalysis.tooGeneric.length ? rejectionAnalysis.tooGeneric.map((item: string) => `- ${item}`).join("\n") : "- None recorded."}
+
+## Ideas Too Crowded (Killed By Searched Market Evidence)
+${rejectionAnalysis.tooCrowded.length ? rejectionAnalysis.tooCrowded.map((item: string) => `- ${item}`).join("\n") : "- None recorded."}
+
+## Which Exact Searched Results Killed Them
+${rejectionAnalysis.killingEvidence.length ? rejectionAnalysis.killingEvidence.map((item: string) => `- ${item}`).join("\n") : "- Market evidence did not include result lists for this run."}
+
+## 5 Better Hidden Workflow Directions (Derived From Failures)
+${betterDirections.length ? betterDirections.join("\n\n") : "- Gather more evidence first, then rerun generation."}
 
 ## Hard Gates Failed
 | Idea | Day-One Sale Probability | Failed hard gates |

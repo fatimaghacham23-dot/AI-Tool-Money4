@@ -1,4 +1,9 @@
 import type { ProductIdeaDraft, ProductScore } from "@/ai/types";
+import {
+  hasBadProductTitleQuality,
+  isGenericProductTitle,
+  normalizeProductTitle,
+} from "@/ai/idea-quality";
 import { normalizeScore } from "@/ai/scoring";
 import type {
   MarketEvidence,
@@ -10,34 +15,102 @@ import type {
 const SOURCE_CODE_TERMS = /github|source code|template|boilerplate|starter kit|repo|repository|codecanyon|vercel template/i;
 const TOOL_TERMS = /software|saas|tool|app|platform|tracker|detector|automation|dashboard|alternative/i;
 const MARKETPLACE_TERMS = /g2|capterra|product hunt|alternativeto|saasworthy|getapp|toolify|futurepedia/i;
+const CONCRETE_WORKFLOW_NOUNS =
+  /\b(approval|signoff|revision|feedback|scope|handoff|promise|contradiction|dispute|drift|proof|log|report|pack|builder|detector|resolver|extractor|spreadsheet|template|checklist|record|trail|figma|slack|loom|screenshot|email|doc|docs|notion|comment|change|source code|boilerplate|github)\b/i;
 
-export function generateMarketSearchQueries(idea: ProductIdeaDraft) {
-  const title = idea.title.trim();
-  const problemPhrase = firstMeaningfulPhrase(idea.pain || idea.description);
-  const workaroundPhrase = firstMeaningfulPhrase(
-    `${idea.pain} ${idea.description}`.replace(/\b(ai|automated|automatic)\b/gi, "manual"),
-  );
+type MarketSearchQueryDebugEvent =
+  | { step: "bad_search_query_dropped"; details: { query: string; reason: string; ideaTitle: string } }
+  | { step: "clean_search_queries_created"; details: { ideaTitle: string; queries: string[] } };
 
-  return uniqueStrings([
-    `${title} software`,
-    `${title} SaaS`,
-    `${title} AI tool`,
-    `${title} app`,
-    `${title} alternative`,
-    `${title} GitHub`,
-    `${title} source code`,
-    `${title} template`,
-    `${title} boilerplate`,
-    problemPhrase ? `${problemPhrase} tool` : "",
-    workaroundPhrase ? `${workaroundPhrase} software` : "",
-  ]).slice(0, 11);
+type MarketSearchQueryDebug = (event: MarketSearchQueryDebugEvent) => void;
+
+export function generateMarketSearchQueries(
+  idea: ProductIdeaDraft,
+  debug?: MarketSearchQueryDebug,
+) {
+  const title = normalizeProductTitle(idea.title, idea.targetBuyer);
+  const titleCore = removeBuyerSuffix(title).toLowerCase();
+  const painfulEvent = cleanWorkflowPhrase(idea.painfulMoment || idea.pain || idea.description);
+  const artifact = cleanWorkflowPhrase(idea.outputArtifact ?? titleCore);
+  const messyInput = cleanWorkflowPhrase(idea.messyInput ?? "");
+  const buyer = conciseSearchBuyer(idea.targetBuyer);
+  const workaround = cleanWorkflowPhrase(idea.manualWorkaroundToday ?? "");
+  const titleArtifact = cleanWorkflowPhrase(titleCore);
+
+  const rawQueries = [
+    title,
+    titleArtifact,
+    artifact,
+    combinePhrases(painfulEvent, artifact),
+    painfulEvent.includes("client") ? painfulEvent : combinePhrases("client", painfulEvent),
+    painfulEvent ? `track ${painfulEvent} manually` : "",
+    buyer && artifact ? `${buyer} ${artifact} spreadsheet` : "",
+    buyer && painfulEvent ? `${buyer} ${painfulEvent} spreadsheet` : "",
+    messyInput && artifact ? `${messyInput} ${artifact}` : "",
+    messyInput && painfulEvent ? `${messyInput} ${painfulEvent}` : "",
+    workaround && artifact ? `${workaround} ${artifact}` : "",
+    artifact ? `${artifact} template` : "",
+    artifact ? `${artifact} spreadsheet` : "",
+    painfulEvent ? `${painfulEvent} proof template` : "",
+    titleArtifact ? `${titleArtifact} GitHub` : "",
+    titleArtifact ? `${titleArtifact} boilerplate` : "",
+    titleArtifact ? `${titleArtifact} source code` : "",
+    ...ensureStringArray(idea.initialSearchQueries),
+  ];
+
+  const dropped: Array<{ query: string; reason: string }> = [];
+  const cleaned = uniqueStrings(
+    rawQueries.map((query) => sanitizeSearchQuery(query, idea.targetBuyer)),
+  ).filter((query) => {
+    const badReason = badSearchPhraseReason(query);
+    if (badReason) {
+      dropped.push({ query, reason: badReason });
+      return false;
+    }
+    return true;
+  });
+
+  for (const item of dropped) {
+    debug?.({
+      step: "bad_search_query_dropped",
+      details: { ...item, ideaTitle: title },
+    });
+  }
+
+  const queries = cleaned.slice(0, 18);
+  debug?.({
+    step: "clean_search_queries_created",
+    details: { ideaTitle: title, queries },
+  });
+
+  return queries;
+}
+
+function ensureStringArray(value: unknown): string[] {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split("\n")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
 }
 
 export async function runMarketExistenceCheck(
   idea: ProductIdeaDraft,
   provider: MarketSearchProvider,
+  debug?: MarketSearchQueryDebug,
 ): Promise<ToolExistenceCheck> {
-  const queries = generateMarketSearchQueries(idea);
+  const queries = generateMarketSearchQueries(idea, debug);
   const evidence: MarketEvidence[] = [];
 
   try {
@@ -71,23 +144,61 @@ export function applyMarketGapRules(
   score: ProductScore,
   check?: ToolExistenceCheck,
 ): ProductScore {
+  const isGeneric = isGenericProductTitle(idea.title);
+  const titleQualityBad =
+    hasBadProductTitleQuality(idea.title, idea.targetBuyer) ||
+    idea.genericRiskReason === "title stuffed with broad buyer list";
+  const missingWorkaround = !(idea.manualWorkaroundToday ?? "").trim();
+  const missingInputs = !(idea.messyInput ?? "").trim();
+  const missingArtifact = !(idea.outputArtifact ?? "").trim();
+  const missingDemo = !(idea.beforeAfterDemo ?? "").trim();
+
   if (!check) {
     return normalizeScore({
       ...score,
       actual_tool_gap: Math.min(score.actual_tool_gap, 5),
       source_code_gap: Math.min(score.source_code_gap, 5),
+      hidden_workflow_specificity: missingWorkaround
+        ? Math.min(score.hidden_workflow_specificity, 5)
+        : titleQualityBad
+          ? Math.min(score.hidden_workflow_specificity, 5)
+        : score.hidden_workflow_specificity,
+      linkedin_demo_strength:
+        missingInputs || missingArtifact || missingDemo || titleQualityBad
+          ? Math.min(score.linkedin_demo_strength, 6)
+          : score.linkedin_demo_strength,
     });
   }
 
   let actualToolGap = Math.min(score.actual_tool_gap, check.actualToolGapScore);
   let sourceCodeGap = Math.min(score.source_code_gap, check.sourceCodeGapScore);
 
-  if (check.exactToolExists && check.similarSaaSTools.length >= 3) {
+  if (isGeneric) {
+    actualToolGap = Math.min(actualToolGap, 4);
+  }
+
+  if (missingWorkaround) {
+    // Hidden workflow specificity cannot be high if the workaround is vague/missing.
+    score.hidden_workflow_specificity = Math.min(score.hidden_workflow_specificity, 5);
+  }
+
+  if (titleQualityBad) {
+    score.hidden_workflow_specificity = Math.min(score.hidden_workflow_specificity, 5);
+    score.linkedin_demo_strength = Math.min(score.linkedin_demo_strength, 6);
+  }
+
+  if (missingInputs || missingArtifact || missingDemo) {
+    score.linkedin_demo_strength = Math.min(score.linkedin_demo_strength, 6);
+  }
+
+  if (check.exactToolExists) {
+    actualToolGap = Math.min(actualToolGap, 3);
+  } else if (check.similarSaaSTools.length >= 3) {
     actualToolGap = Math.min(actualToolGap, 6);
   }
 
   if (check.similarSourceCodeKits.length >= 2) {
-    sourceCodeGap = Math.min(sourceCodeGap, 6);
+    sourceCodeGap = Math.min(sourceCodeGap, 3);
   }
 
   if (check.commonCategoryRisk === "high") {
@@ -232,14 +343,120 @@ function tokenSet(text: string) {
   );
 }
 
-function firstMeaningfulPhrase(text: string) {
+export function isBadSearchPhrase(query: string) {
+  return Boolean(badSearchPhraseReason(query));
+}
+
+function badSearchPhraseReason(query: string) {
+  const normalized = query.replace(/["']/g, "").replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  if (!lower) return "empty_query";
+  if (lower.startsWith("they ")) return "starts_with_they";
+  if (lower.includes("want an ai tool")) return "vague_ai_tool_fragment";
+  if (lower.includes("need a modern starter")) return "vague_starter_fragment";
+  if (hasFullBuyerList(lower)) return "full_buyer_list";
+  if (!CONCRETE_WORKFLOW_NOUNS.test(lower)) return "no_concrete_workflow_noun";
+
+  const meaningful = meaningfulWords(lower);
+  if (meaningful.length < 3) return "too_few_meaningful_words";
+  if (meaningful.length < 4 && !CONCRETE_WORKFLOW_NOUNS.test(lower)) {
+    return "too_few_meaningful_words";
+  }
+
+  if (/^(pain|problem|issue|frustration|they|buyer)\b/i.test(lower) && !/\b(log|proof|report|template|spreadsheet|pack|record|builder|detector|resolver|extractor)\b/i.test(lower)) {
+    return "buyer_pain_without_artifact";
+  }
+
+  return "";
+}
+
+function sanitizeSearchQuery(query: string, buyer?: string) {
+  let cleaned = (query ?? "")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (buyer) {
+    const rawBuyer = buyer.replace(/\s+/g, " ").trim();
+    if (rawBuyer) {
+      cleaned = cleaned.replace(new RegExp(escapeRegExp(rawBuyer), "gi"), conciseSearchBuyer(rawBuyer));
+    }
+  }
+
+  cleaned = cleaned
+    .replace(/\bfor\s+([^"]*?,[^"]*)$/i, (_match, suffix: string) => {
+      const concise = conciseSearchBuyer(suffix);
+      return concise ? `for ${concise}` : "";
+    })
+    .replace(/\b(ai tool to|they want an ai tool to|they need a modern starter that)\b/gi, "")
+    .replace(/\s*,\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned;
+}
+
+function cleanWorkflowPhrase(text: string) {
   return text
     .replace(/[^a-zA-Z0-9\s-]/g, " ")
+    .replace(/\b(ai|automated|automatic|tool|app|software|saas|platform|system)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 6)
     .join(" ")
-    .trim();
+    .toLowerCase();
+}
+
+function removeBuyerSuffix(title: string) {
+  return title.replace(/\s+for\s+[^,]+$/i, "").trim();
+}
+
+function combinePhrases(...parts: string[]) {
+  return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function conciseSearchBuyer(buyer?: string) {
+  const raw = (buyer ?? "").replace(/[^a-zA-Z0-9\s,/-]/g, " ").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+  const lower = raw.toLowerCase();
+  const known: Array<[RegExp, string]> = [
+    [/\bweb\s+design\s+agenc/i, "web design agency"],
+    [/\bdesign\s+agenc/i, "design agency"],
+    [/\bbranding\s+studio/i, "branding studio"],
+    [/\bdev\s+shops?\b|\bdevelopment\s+shops?\b/i, "dev shop"],
+    [/\btechnical\s+founders?\b/i, "technical founder"],
+    [/\bproductized\s+service\b/i, "productized service"],
+    [/\bsolo\s+service\s+providers?\b/i, "service provider"],
+    [/\bconsultants?\b/i, "consultant"],
+    [/\bfreelancers?\b/i, "freelancer"],
+    [/\bagenc(?:y|ies)\b/i, "agency"],
+    [/\bstudios?\b/i, "studio"],
+  ];
+  const match = known.find(([pattern]) => pattern.test(lower));
+  if (match) return match[1];
+
+  return raw
+    .split(/,|;|\/|\band\b/i)
+    .map((segment) => segment.trim())
+    .filter(Boolean)[0]
+    ?.split(/\s+/)
+    .slice(0, 3)
+    .join(" ")
+    .toLowerCase() ?? "";
+}
+
+function meaningfulWords(query: string) {
+  return query
+    .split(/[^a-z0-9]+/i)
+    .map((word) => word.toLowerCase())
+    .filter((word) => word.length > 2 && !["the", "for", "and", "with", "from", "that", "into", "they", "want", "need"].includes(word));
+}
+
+function hasFullBuyerList(query: string) {
+  return /\b(small agencies|agencies),\s*(freelancers|consultants|productized|technical|solo|dev)/i.test(query);
 }
 
 function uniqueStrings(items: string[]) {
@@ -254,4 +471,8 @@ function uniqueByUrl(results: MarketSearchResult[]) {
     seen.add(key);
     return true;
   });
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

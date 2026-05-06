@@ -64,6 +64,15 @@ export type ProductIdeaDraft = {
   targetBuyer: string;
   pain: string;
   whyBuySourceCode: string;
+  manualWorkaroundToday?: string;
+  messyInput?: string;
+  outputArtifact?: string;
+  painfulMoment?: string;
+  broadSaasNotEnoughReason?: string;
+  beforeAfterDemo?: string;
+  initialSearchQueries?: string[];
+  nicheDownAttempts?: string[];
+  genericRiskReason?: string;
   mvpFeatures: string[];
   fullFeatures: string[];
   pricingIdea: string;

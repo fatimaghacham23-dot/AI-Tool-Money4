@@ -4,6 +4,10 @@ import { z } from "zod";
 import { createInitialMarketEvidence } from "@/ai/debate-runner";
 import { RunDebugTracer } from "@/lib/debug/run-debug-tracer";
 import { DEMO_RUN_ID } from "@/lib/data/mock";
+import {
+  createMarketEvidenceInsertDiagnostic,
+  normalizeStrengthScore,
+} from "@/lib/db/market-evidence";
 import { hasGitHubModelsEnv, hasOpenAIEnv, hasSupabaseEnv } from "@/lib/env";
 import { createClient } from "@/lib/supabase/server";
 import { titleFromGoal } from "@/lib/utils";
@@ -182,6 +186,19 @@ export async function POST(request: Request) {
   });
 
   if (initialEvidence.length) {
+    const insertDiagnostics = initialEvidence.map((item) =>
+      createMarketEvidenceInsertDiagnostic({
+        source: item.sourceName || item.sourceType,
+        strengthScore: item.strengthScore,
+      }),
+    );
+    tracer.addEvent({
+      step: "market_evidence_insert_diagnostic",
+      status: "event",
+      details: insertDiagnostics,
+    });
+    console.log("MARKET_EVIDENCE_INSERT_DIAGNOSTIC", insertDiagnostics);
+
     const { error: evidenceError } = await supabase.from("market_evidence").insert(
       initialEvidence.map((item) => ({
         council_run_id: run.id,
@@ -192,7 +209,7 @@ export async function POST(request: Request) {
         title: item.title,
         content: item.content,
         signal_type: item.signalType,
-        strength_score: item.strengthScore,
+        strength_score: normalizeStrengthScore(item.strengthScore),
       })),
     );
 

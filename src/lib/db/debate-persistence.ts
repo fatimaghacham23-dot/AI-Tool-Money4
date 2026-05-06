@@ -10,6 +10,10 @@ import type {
   ScoredProductIdea,
 } from "@/ai/types";
 import { DAY_ONE_BUILD_THRESHOLD } from "@/ai/scoring";
+import {
+  createMarketEvidenceInsertDiagnostic,
+  normalizeStrengthScore,
+} from "@/lib/db/market-evidence";
 import { ensureTextArray } from "@/lib/db/normalize-db-values";
 import type { Database, Json, ProductIdeaStatus } from "@/types/database";
 
@@ -149,6 +153,14 @@ export class SupabaseDebatePersistence implements DebatePersistence {
       return [];
     }
 
+    const insertDiagnostics = evidence.map((item) =>
+      createMarketEvidenceInsertDiagnostic({
+        source: item.sourceName || item.sourceType,
+        strengthScore: item.strengthScore,
+      }),
+    );
+    console.log("MARKET_EVIDENCE_INSERT_DIAGNOSTIC", insertDiagnostics);
+
     const { data, error } = await this.client
       .from("market_evidence")
       .insert(
@@ -161,7 +173,7 @@ export class SupabaseDebatePersistence implements DebatePersistence {
           title: item.title,
           content: item.content,
           signal_type: item.signalType,
-          strength_score: item.strengthScore,
+          strength_score: normalizeStrengthScore(item.strengthScore),
         })),
       )
       .select("*");
