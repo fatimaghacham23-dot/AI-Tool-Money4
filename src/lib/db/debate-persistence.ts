@@ -251,11 +251,11 @@ export class SupabaseDebatePersistence implements DebatePersistence {
   }
 
   async saveFinalReport(report: FinalReportDraft, winner: ScoredProductIdea) {
-    if (!winner.id) {
+    const finalDecision = report.finalDecision ?? "validate_first";
+    if (!winner.id && finalDecision !== "reject_all") {
       throw new Error("Cannot save final report without a persisted product idea id.");
     }
 
-    const finalDecision = report.finalDecision ?? "validate_first";
     const canBuildNow =
       finalDecision === "build_now" &&
       (report.dayOneSaleProbability ?? winner.score.total_score) >= DAY_ONE_BUILD_THRESHOLD;
@@ -291,25 +291,27 @@ export class SupabaseDebatePersistence implements DebatePersistence {
       throw runError;
     }
 
-    const nextFactoryStatus =
-      canBuildNow
-        ? "winner"
-        : finalDecision === "reject_all"
-          ? "rejected"
-          : "validating";
-    const { error: winnerError } = await this.client
-      .from("product_ideas")
-      .update({
-        factory_status: nextFactoryStatus,
-        rejected_reason:
-          nextFactoryStatus === "rejected"
-            ? "Rejected by Day-One Sale Probability judge."
-            : null,
-      })
-      .eq("id", winner.id);
+    if (winner.id) {
+      const nextFactoryStatus =
+        canBuildNow
+          ? "winner"
+          : finalDecision === "reject_all"
+            ? "rejected"
+            : "validating";
+      const { error: winnerError } = await this.client
+        .from("product_ideas")
+        .update({
+          factory_status: nextFactoryStatus,
+          rejected_reason:
+            nextFactoryStatus === "rejected"
+              ? "Rejected by Day-One Sale Probability judge."
+              : null,
+        })
+        .eq("id", winner.id);
 
-    if (winnerError) {
-      throw winnerError;
+      if (winnerError) {
+        throw winnerError;
+      }
     }
   }
 }
