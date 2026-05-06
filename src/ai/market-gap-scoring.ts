@@ -30,11 +30,11 @@ export function generateMarketSearchQueries(
 ) {
   const title = normalizeProductTitle(idea.title, idea.targetBuyer);
   const titleCore = removeBuyerSuffix(title).toLowerCase();
-  const painfulEvent = cleanWorkflowPhrase(idea.painfulMoment || idea.pain || idea.description);
+  const painfulEvent = cleanManualPainForSearch(idea.painfulMoment || idea.pain || idea.description);
   const artifact = cleanWorkflowPhrase(idea.outputArtifact ?? titleCore);
   const messyInput = cleanWorkflowPhrase(idea.messyInput ?? "");
   const buyer = conciseSearchBuyer(idea.targetBuyer);
-  const workaround = cleanWorkflowPhrase(idea.manualWorkaroundToday ?? "");
+  const workaround = cleanManualPainForSearch(idea.manualWorkaroundToday ?? "");
   const titleArtifact = cleanWorkflowPhrase(titleCore);
 
   const rawQueries = [
@@ -347,13 +347,46 @@ export function isBadSearchPhrase(query: string) {
   return Boolean(badSearchPhraseReason(query));
 }
 
+export function cleanManualPainForSearch(value: string | undefined | null) {
+  const lower = (value ?? "")
+    .replace(/[^a-zA-Z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!lower) return "";
+
+  const concepts: Array<[RegExp, string]> = [
+    [/\b(proposal|proposals)\b.*\b(approval|approve|review|handoff|reuse|audit|evidence|proof)\b|\b(proposal|proposals)\b/i, "proposal review handoff"],
+    [/\b(invoice|invoices)\b.*\b(unpaid|follow|payment|collections?|overdue)\b|\b(unpaid|overdue)\s+invoices?\b/i, "unpaid invoice followup log"],
+    [/\b(spreadsheet|spreadsheets)\b.*\b(rebuild|rebuilding|copy|recurring|client)\b|\brebuilding\s+.*\bspreadsheet/i, "client spreadsheet rebuild audit"],
+    [/\b(client portal|portal)\b.*\b(rebuild|handoff|approval|content|asset)\b/i, "client portal handoff checklist"],
+    [/\b(approval|signoff)\b.*\b(reversal|reverses|contradict|dispute)\b/i, "approval reversal proof log"],
+    [/\b(feedback|comments?)\b.*\b(drift|contradict|revision|scope)\b/i, "feedback drift report"],
+    [/\b(scope)\b.*\b(promise|change|creep|resurface|late)\b/i, "scope promise change record"],
+    [/\b(handoff)\b.*\b(assumption|gap|client|team)\b/i, "handoff assumption gap report"],
+    [/\b(screenshot|screenshots?)\b.*\b(revision|markup|dispute|approval)\b/i, "screenshot revision dispute pack"],
+    [/\b(loom|video)\b.*\b(feedback|revision|scope|approval)\b/i, "loom feedback scope report"],
+  ];
+
+  const match = concepts.find(([pattern]) => pattern.test(lower));
+  if (match) return match[1];
+
+  const cleaned = cleanWorkflowPhrase(lower);
+  if (!CONCRETE_WORKFLOW_NOUNS.test(cleaned)) return "";
+  if (hasVagueSentenceFragment(cleaned)) return "";
+  return cleaned;
+}
+
 function badSearchPhraseReason(query: string) {
   const normalized = query.replace(/["']/g, "").replace(/\s+/g, " ").trim();
   const lower = normalized.toLowerCase();
   if (!lower) return "empty_query";
   if (lower.startsWith("they ")) return "starts_with_they";
+  if (hasVagueSentenceFragment(lower)) return "vague_sentence_fragment";
   if (lower.includes("want an ai tool")) return "vague_ai_tool_fragment";
   if (lower.includes("need a modern starter")) return "vague_starter_fragment";
+  if (/\b(is|are|was|were)\s+(repetitive|awkward)\b/i.test(lower)) return "vague_quality_sentence";
+  if (/\bproof template\b/i.test(lower) && /\b(they|buyer|wants?|keep|keeps|is|are|faster path)\b/i.test(lower)) return "proof_template_vague_fragment";
   if (hasFullBuyerList(lower)) return "full_buyer_list";
   if (!CONCRETE_WORKFLOW_NOUNS.test(lower)) return "no_concrete_workflow_noun";
 
@@ -367,7 +400,18 @@ function badSearchPhraseReason(query: string) {
     return "buyer_pain_without_artifact";
   }
 
+  if (!hasNounWorkflowArtifact(lower)) return "missing_noun_workflow_artifact";
+
   return "";
+}
+
+function hasVagueSentenceFragment(lower: string) {
+  return /\b(they keep|they want|buyer wants|the buyer wants|faster path|is repetitive|is awkward)\b/i.test(lower);
+}
+
+function hasNounWorkflowArtifact(lower: string) {
+  return /\b[a-z0-9-]+\s+(approval|signoff|revision|feedback|scope|handoff|promise|contradiction|dispute|drift|proof|log|report|pack|builder|detector|resolver|extractor|spreadsheet|template|checklist|record|trail|comment|change|audit|evidence)\b/i.test(lower) ||
+    /\b(approval|signoff|revision|feedback|scope|handoff|promise|contradiction|dispute|drift|proof|log|report|pack|builder|detector|resolver|extractor|spreadsheet|template|checklist|record|trail|audit|evidence)\s+[a-z0-9-]+\b/i.test(lower);
 }
 
 function sanitizeSearchQuery(query: string, buyer?: string) {

@@ -73,7 +73,7 @@ function generateMarketSearchQueries(idea) {
   const title = normalizeProductTitle(idea.title, idea.targetBuyer);
   const titleCore = title.replace(/\s+for\s+[^,]+$/i, "").toLowerCase();
   const artifact = cleanWorkflowPhrase(idea.outputArtifact || titleCore);
-  const painful = cleanWorkflowPhrase(idea.painfulMoment || idea.pain || idea.description || "");
+  const painful = cleanManualPainForSearch(idea.painfulMoment || idea.pain || idea.description || "");
   const messyInput = cleanWorkflowPhrase(idea.messyInput || "");
   const buyer = conciseSearchBuyer(idea.targetBuyer);
   const rawQueries = [
@@ -99,13 +99,39 @@ function isBadSearchPhrase(query) {
   const normalized = query.replace(/["']/g, "").replace(/\s+/g, " ").trim().toLowerCase();
   if (!normalized) return true;
   if (normalized.startsWith("they ")) return true;
+  if (/\b(they keep|they want|buyer wants|faster path|is repetitive|is awkward)\b/i.test(normalized)) return true;
   if (normalized.includes("want an ai tool")) return true;
   if (normalized.includes("need a modern starter")) return true;
+  if (/\bproof template\b/i.test(normalized) && /\b(they|buyer|wants?|keep|keeps|is|are|faster path)\b/i.test(normalized)) return true;
   if (!CONCRETE_WORKFLOW_NOUNS.test(normalized)) return true;
+  if (!hasNounWorkflowArtifact(normalized)) return true;
   const meaningful = normalized
     .split(/[^a-z0-9]+/)
     .filter((word) => word.length > 2 && !["the", "for", "and", "with", "from", "that", "they", "want", "need"].includes(word));
   return meaningful.length < 3;
+}
+
+function cleanManualPainForSearch(value) {
+  const lower = (value ?? "").replace(/[^a-zA-Z0-9\s-]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!lower) return "";
+  const concepts = [
+    [/\b(proposal|proposals)\b/i, "proposal review handoff"],
+    [/\b(unpaid|overdue|invoice|invoices)\b/i, "unpaid invoice followup log"],
+    [/\b(spreadsheet|spreadsheets)\b.*\b(rebuild|rebuilding|client)\b|\brebuilding\s+.*\bspreadsheet/i, "client spreadsheet rebuild audit"],
+    [/\b(approval|signoff)\b.*\b(reversal|reverses|contradict|dispute)\b/i, "approval reversal proof log"],
+    [/\b(feedback|comments?)\b.*\b(drift|contradict|revision|scope)\b/i, "feedback drift report"],
+  ];
+  const match = concepts.find(([pattern]) => pattern.test(lower));
+  if (match) return match[1];
+  const cleaned = cleanWorkflowPhrase(lower);
+  if (!CONCRETE_WORKFLOW_NOUNS.test(cleaned)) return "";
+  if (/\b(they keep|they want|buyer wants|faster path|is repetitive|is awkward)\b/i.test(cleaned)) return "";
+  return cleaned;
+}
+
+function hasNounWorkflowArtifact(query) {
+  return /\b[a-z0-9-]+\s+(approval|signoff|revision|feedback|scope|handoff|promise|contradiction|dispute|drift|proof|log|report|pack|builder|detector|resolver|extractor|spreadsheet|template|checklist|record|trail|audit|evidence)\b/i.test(query) ||
+    /\b(approval|signoff|revision|feedback|scope|handoff|promise|contradiction|dispute|drift|proof|log|report|pack|builder|detector|resolver|extractor|spreadsheet|template|checklist|record|trail|audit|evidence)\s+[a-z0-9-]+\b/i.test(query);
 }
 
 const GENERIC_WORDS = new Set([
@@ -276,11 +302,25 @@ function escapeRegExp(value) {
   assert.equal(dedupeIdeas(ideas).length, 1);
 }
 
-// 3) Vague model fragments are rejected as market-search phrases.
+// 3) Kill switch reject_all exits before market search.
+{
+  const events = [];
+  const result = simulateKillSwitchPipeline([
+    { title: "Client Portal", targetBuyer: "Agencies", manualWorkaroundToday: "", messyInput: "", outputArtifact: "", painfulMoment: "" },
+  ], events);
+  assert.equal(result.finalDecision, "reject_all");
+  assert.equal(result.marketSearchRan, false);
+  assert.equal(events.some((event) => event.step === "kill_switch_reject_all"), true);
+}
+
+// 4) Vague model fragments are rejected as market-search phrases.
 assert.equal(isBadSearchPhrase("They want an AI tool to"), true);
 assert.equal(isBadSearchPhrase("revision contradiction log"), false);
+assert.equal(isBadSearchPhrase("freelancer they keep rebuilding the same client spreadsheet"), true);
+assert.equal(isBadSearchPhrase("agency the buyer wants a faster path spreadsheet"), true);
+assert.equal(isBadSearchPhrase("writing proposals is repetitive and slows proof template"), true);
 
-// 4) Clean Exa queries include artifact/workflow phrases, not the full buyer list.
+// 5) Clean Exa queries include artifact/workflow phrases, not the full buyer list.
 {
   const queries = generateMarketSearchQueries({
     title: "Approval Reversal Proof Log for Small agencies, freelancers, consultants, productized service businesses",
@@ -300,4 +340,40 @@ assert.equal(isBadSearchPhrase("revision contradiction log"), false);
   assert.ok(!queries.some((query) => /^They /i.test(query)), queries.join(" | "));
 }
 
+
+// 6) Better direction queries do not reuse raw pain fragments.
+{
+  const directions = createBetterDirectionQueries({
+    title: "Client Portal Rebuilder",
+    targetBuyer: "web design agency",
+    messyInput: "client emails",
+    outputArtifact: "approval reversal proof log",
+    painfulMoment: "They keep rebuilding the same client portal because buyer wants a faster path",
+  });
+  assert.ok(!directions.some((query) => /\bthey\b|buyer wants|faster path|they keep rebuilding/i.test(query)), directions.join(" | "));
+}
+
 console.log("idea-quality-check: OK");
+
+function simulateKillSwitchPipeline(ideas, events) {
+  const removedIdeas = ideas.map((idea) => ({ idea, reason: "Generic title" }));
+  const survivingIdeas = [];
+  if (survivingIdeas.length === 0) {
+    events.push({
+      step: "kill_switch_reject_all",
+      originalIdeas: ideas,
+      survivingIdeas,
+      removedIdeas,
+      reasons: removedIdeas.map((item) => item.reason),
+    });
+    return { finalDecision: "reject_all", status: "completed", marketSearchRan: false };
+  }
+  return { finalDecision: "validate_first", status: "completed", marketSearchRan: true };
+}
+
+function createBetterDirectionQueries(seed) {
+  const painfulMoment = /\b(they keep|buyer wants|faster path)\b/i.test(seed.painfulMoment)
+    ? "client reverses approval after signoff"
+    : seed.painfulMoment;
+  return generateMarketSearchQueries({ ...seed, painfulMoment, initialSearchQueries: [] });
+}

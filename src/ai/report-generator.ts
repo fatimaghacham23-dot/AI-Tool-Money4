@@ -469,8 +469,16 @@ function analyzeRejectAllContext(context: ReportContext) {
     })
     .slice(0, 12);
 
+  const failureStage = context.finalDecisionReason?.includes("generic/structure kill switch")
+    ? "All generated ideas were removed by the generic/structure kill switch before market search."
+    : context.finalDecisionReason?.includes("market")
+      ? "Failure happened at the market gate after searched evidence."
+      : "Failure happened at the hard-gate review.";
+
   const generationFailedSummary =
-    tooGeneric.length && tooCrowded.length
+    context.finalDecisionReason?.includes("generic/structure kill switch")
+      ? "All generated ideas were removed by the generic/structure kill switch before market search."
+      : tooGeneric.length && tooCrowded.length
       ? "Idea generation produced a mix of generic titles/structures AND market-crowded ideas, so the run had nothing weirdly-specific that also cleared searched evidence."
       : tooGeneric.length
         ? "Idea generation produced too many generic titles/structures that did not clearly name a hidden manual workflow (buyer + messy input + workaround + artifact + painful moment)."
@@ -480,6 +488,7 @@ function analyzeRejectAllContext(context: ReportContext) {
 
   return {
     generationFailedSummary,
+    failureStage,
     tooGeneric,
     tooCrowded,
     killingEvidence,
@@ -539,13 +548,13 @@ function createBetterWorkflowDirection(
   onGenerated?: ReportDebugOptions["onBetterDirectionGenerated"],
 ) {
   const buyer = exactBuyerNiche(seed.targetBuyer, index);
-  const messyInput = exactOrFallback(seed.messyInput, directionMessyInputFallback(index));
-  const manualWorkaround = exactOrFallback(
+  const messyInput = concreteDirectionValue(seed.messyInput, directionMessyInputFallback(index));
+  const manualWorkaround = concreteDirectionValue(
     seed.manualWorkaroundToday,
     directionManualWorkaroundFallback(messyInput, index),
   );
-  const outputArtifact = exactOrFallback(seed.outputArtifact, directionArtifactFallback(index));
-  const painfulMoment = exactOrFallback(seed.painfulMoment || seed.pain, directionPainfulFallback(index));
+  const outputArtifact = concreteDirectionValue(seed.outputArtifact, directionArtifactFallback(index));
+  const painfulMoment = concreteDirectionEvent(seed.painfulMoment || seed.pain, directionPainfulFallback(index));
   let title = normalizeProductTitle(
     `${singularInputLabel(messyInput)} ${outputArtifact} for ${buyer}`,
     buyer,
@@ -611,8 +620,23 @@ function createFallbackDirectionSeeds(count: number): ProductIdeaDraft[] {
   }));
 }
 
-function exactOrFallback(value: string | undefined, fallback: string) {
-  return value?.trim() || fallback;
+function concreteDirectionValue(value: string | undefined, fallback: string) {
+  const cleaned = value?.replace(/\s+/g, " ").trim() ?? "";
+  if (!cleaned || hasRawPainFragment(cleaned)) return fallback;
+  if (cleaned.split(/\s+/).length > 8) return fallback;
+  return cleaned;
+}
+
+function concreteDirectionEvent(value: string | undefined, fallback: string) {
+  const cleaned = value?.replace(/\s+/g, " ").trim() ?? "";
+  if (!cleaned || hasRawPainFragment(cleaned)) return fallback;
+  if (/^(they|buyer|the buyer)\b/i.test(cleaned)) return fallback;
+  if (cleaned.split(/\s+/).length > 9) return fallback;
+  return cleaned;
+}
+
+function hasRawPainFragment(value: string) {
+  return /\b(they keep|they want|buyer wants|the buyer wants|faster path|is repetitive|is awkward)\b/i.test(value);
 }
 
 function exactBuyerNiche(value: string | undefined, index: number) {
@@ -766,6 +790,9 @@ Reject all. Generate better hidden-gap ideas or add stronger market evidence.
 
 ## Why No Idea Passed
 The scored shortlist did not produce a product with enough actual tool gap, hidden workflow specificity, and manual workaround pain to deserve build time or even a validation push. The highest-scored rejected idea was ${highestScoredIdea.title} at ${dayOneSaleProbability}/100, but the council should not treat it as a winner.
+
+## Where Failure Happened
+${rejectionAnalysis.failureStage}
 
 ## Why Generation Failed (Upstream)
 ${rejectionAnalysis.generationFailedSummary}
